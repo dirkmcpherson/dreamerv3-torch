@@ -9,7 +9,6 @@ import tools
 
 to_np = lambda x: x.detach().cpu().numpy()
 
-
 class RewardEMA(object):
     """running mean and std"""
 
@@ -176,7 +175,7 @@ class WorldModel(nn.Module):
 
     def preprocess(self, obs):
         obs = obs.copy()
-        obs["image"] = torch.Tensor(obs["image"]) / 255.0 - 0.5
+        obs["image"] = torch.Tensor(obs["image"]) / 255.0 - 0.5 # normalize and zero-mean
         # (batch_size, batch_length) -> (batch_size, batch_length, 1)
         obs["reward"] = torch.Tensor(obs["reward"]).unsqueeze(-1)
         if "discount" in obs:
@@ -269,6 +268,7 @@ class ImagBehavior(nn.Module):
         if config.slow_value_target:
             self._slow_value = copy.deepcopy(self.value)
             self._updates = 0
+            
         kw = dict(wd=config.weight_decay, opt=config.opt, use_amp=self._use_amp)
         self._actor_opt = tools.Optimizer(
             "actor",

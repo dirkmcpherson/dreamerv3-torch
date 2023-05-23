@@ -159,6 +159,8 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         obs = list(obs)
         reward = list(reward)
         done = np.stack(done)
+        # if int(done.sum()) > 0:
+        #     print(f"\t\tFinished episode {episode} at step {step}")
         episode += int(done.sum())
         length += 1
         step += (done * length).sum()
