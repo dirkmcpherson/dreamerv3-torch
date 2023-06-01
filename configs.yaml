@@ -8,7 +8,7 @@ defaults:
   seed: 0
   steps: 1e6
   eval_every: 1e4
-  eval_episode_num: 10
+  eval_episode_num: 1 #10
   log_every: 5e3 #1e4
   reset_every: 0
   device: 'cuda:0'
@@ -100,6 +100,9 @@ defaults:
   actor_min_std: 0.1
   actor_max_std: 1.0
   actor_temp: 0.1
+  slow_target: True
+  slow_target_update: 100
+  slow_target_fraction: 1.0
   expl_amount: 0.0
   eval_state_mean: False
   collect_dyn_sample: True
@@ -120,6 +123,9 @@ defaults:
   manager_temp: 0.1
   manager_lr: 3e-5
   manager_grad_clip: 100
+  manager_grad: reinforce
+  manager_actent: 0.5
+  actor: {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1}
 
   goal_ae_layers: 2
   goal_ae_units: 512
@@ -165,7 +171,7 @@ dmc_proprio:
 atari100k:
   steps: 4e5
   action_repeat: 4
-  eval_episode_num: 1 # 100
+  eval_episode_num: 100
   stickey: False
   lives: unused
   noops: 30

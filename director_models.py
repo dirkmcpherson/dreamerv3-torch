@@ -63,21 +63,12 @@ class HierarchyBehavior(nn.Module):
             **config.goal_decoder
         )
 
-        self.manager = networks.ActionHead(
-            feat_size,
-            z_dim, # size out output
-            config.manager_layers,
-            config.manager_units,
-            config.act,
-            config.norm,
-            config.manager_dist,
-            config.manager_init_std,
-            config.manager_min_std,
-            config.manager_max_std,
-            config.manager_temp,
-            outscale=1.0,
-            unimix_ratio=config.action_unimix_ratio,   
-        )
+        self.manager_actor = networks.MLP(
+            config.dyn_deter,
+            config.skill_shape,
+            **config.actor
+        ) 
+
         self.manager_exploration_value = networks.MLP(
             feat_size,  # pytorch version
             (255,),
@@ -166,7 +157,7 @@ class HierarchyBehavior(nn.Module):
 
         self._manager_opt = tools.Optimizer(
             "manager",
-            self.manager.parameters(),
+            self.manager_actor.parameters(),
             config.manager_lr,
             config.ac_opt_eps,
             config.manager_grad_clip,
@@ -204,7 +195,7 @@ class HierarchyBehavior(nn.Module):
 
         # Look at a random subset of batches 
         random_batches = random.choices(range(data["image"].shape[0]), k=4)
-        random_samples = random.choices(range(data["image"].shape[1]), k=2)
+        random_samples = random.choices(range(data["image"].shape[1]), k=1)
 
         actions = data["action"][random_batches, :]
         is_first = data["is_first"][random_batches, :]
@@ -270,13 +261,14 @@ class HierarchyBehavior(nn.Module):
         # print(f"director_models::_compute_manager_target"); ipshell()
         return target, weights, value[:-1]
     def extr_reward(self, state):
-        extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mode() # NOTE: Original uses mean()[1:] 
+        # extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mode() # NOTE: Original uses mean()[1:] 
+        extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mean()[1:]
         return extrR
 
     def expl_reward(self, feat, state, action):
         # elbo (Evidence Lower BOund) reward
         # NOTE: hafner's code uses a context variable whose use I don't understand.
-        feat = self._world_model.dynamics.get_feat(state)
+        feat = state["deter"]
         enc = self.goal_enc(feat)
         x = enc.sample()
         x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
@@ -303,14 +295,12 @@ class HierarchyBehavior(nn.Module):
         return torch.einsum("...i,...i->...", goal / norm, h / norm)[1:] # NOTE
 
     def split_traj(self, traj):
-        traj.copy()
+        traj = traj.copy()
         k = self._config.train_skill_duration
         # print(f"Trajectory length must be divisible by k+1 {len(traj['action'])} % {k} != 1")
         assert len(traj['action']) % k == 1; (len(traj['action']) % k), "Trajectory length must be divisible by k+1"
         reshape = lambda x: x.reshape([x.shape[0] // k, k] + list(x.shape[1:]))
         for key, val in list(traj.items()):
-            if "reward" in key:
-                ipshell()
             print(f"director_models::split_traj::key: {key}, val.shape: {val.shape}")
             val = torch.concat([0 * val[:1], val], 0) if 'reward' in key else val
             # (1 2 3 4 5 6 7 8 9 10) -> ((1 2 3 4) (4 5 6 7) (7 8 9 10))
@@ -323,16 +313,69 @@ class HierarchyBehavior(nn.Module):
             traj[key] = val
         # Bootstrap sub trajectory against current not next goal.
         traj['goal'] = torch.concat([traj['goal'][:-1], traj['goal'][:1]], 0)
-        traj['weight'] = torch.math.cumprod(
-            self.config.discount * traj['cont']) / self.config.discount
+        traj['weight'] = torch.cumprod(
+            self._config.discount * traj['cont'], axis=0) / self._config.discount
         return traj
-        pass
 
-    def abstract_traj(self, traj):
-        traj.copy()
+    def abstract_traj(self, orig_traj):
+        traj = orig_traj.copy()
+        traj["action"] = traj.pop("goal")
         k = self._config.train_skill_duration
-        pass
+        reshape = lambda x: x.reshape([x.shape[0] // k, k] + list(x.shape[1:]))
+        weights = torch.cumprod(reshape(traj["cont"][:-1]), 1).to(self._config.device)
+        for key, value in list(traj.items()):
+            if 'reward' in key:
+                try:
+                    traj[key] = (reshape(value) * weights).mean(1)
+                except:
+                    ipshell()
+            elif key == 'cont':
+                traj[key] = torch.concat([value[:1], reshape(value[1:]).prod(1)], 0)
+            else:
+                traj[key] = torch.concat([reshape(value[:-1])[:, 0], value[-1:]], 0)
+        traj['weight'] = torch.cumprod(
+            self._config.discount * traj['cont'], 0) / self._config.discount
+        
+        for key, value in list(traj.items()):
+            if key == "action":
+                old = orig_traj["goal"]
+            elif key not in orig_traj:
+                continue
+            else:
+                old = orig_traj[key]
+            print(f"{key} shape:  {old.shape} --> {value.shape}")
+            
+        return traj
 
+    def train_goal_vae(self, start, context, metrics):
+        # context feat is thes 
+        # feat = context["feat"].detach()
+        feat = start["deter"].detach()
+        feat.requires_grad = True
+
+        enc = self.goal_enc(feat)
+        x = enc.sample()
+        x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
+        dec = self.goal_dec(x)
+        
+        # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
+        rec = -dec.log_prob(feat.detach())
+        kl = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
+        loss = torch.mean(rec + kl)
+        
+        # dot = make_dot(loss, params=dict(list(self.goal_enc.named_parameters()) + list(self.goal_dec.named_parameters())), show_attrs=True, show_saved=True)
+        # dot.format = "png"
+        # dot.render("goal_ae_loss", directory="./graphs")
+
+        # with tools.RequiresGrad(self):
+        metrics.update(tools.tensorstats(rec, "goal_ae_rec"))
+        metrics.update(tools.tensorstats(kl, "goal_ae_kl"))
+        metrics.update(tools.tensorstats(loss, "goal_ae_loss"))
+
+        self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()))
+        # print(f"director_models::_train::train_goal_vae"); ipshell()
+        return metrics
+    
     def _train(
         self,
         start,
@@ -357,39 +400,11 @@ class HierarchyBehavior(nn.Module):
         # print("context feat == start feat. NOTE: Remove this for real training.")
 
         # make_dot(context["feat"], show_attrs=True, show_saved=True).save("feat.dot", directory="./graphs")
-        def train_goal_vae(start, context, metrics):
-            # context feat is thes 
-            # feat = context["feat"].detach()
-            feat = start["deter"].detach()
-            feat.requires_grad = True
 
-            enc = self.goal_enc(feat)
-            x = enc.sample()
-            x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
-            dec = self.goal_dec(x)
-            
-            # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
-            rec = -dec.log_prob(feat.detach())
-            kl = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-            loss = torch.mean(rec + kl)
-            
-            # dot = make_dot(loss, params=dict(list(self.goal_enc.named_parameters()) + list(self.goal_dec.named_parameters())), show_attrs=True, show_saved=True)
-            # dot.format = "png"
-            # dot.render("goal_ae_loss", directory="./graphs")
-
-            # with tools.RequiresGrad(self):
-            metrics.update(tools.tensorstats(rec, "goal_ae_rec"))
-            metrics.update(tools.tensorstats(kl, "goal_ae_kl"))
-            metrics.update(tools.tensorstats(loss, "goal_ae_loss"))
-
-            self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()))
-            # print(f"director_models::_train::train_goal_vae"); ipshell()
-
-            return metrics
 
         # Train the goal autoencoder on world model representations
         # NOTE: These are posterior representations of the world model (s_t|s_t-1, a_t-1, x_t)
-        metrics = train_goal_vae(start, context, metrics)
+        metrics = self.train_goal_vae(start, context, metrics)
 
         if self._config.debug_only_goal_ae:
             return [metrics]
@@ -406,6 +421,9 @@ class HierarchyBehavior(nn.Module):
         reward_extr = self.extr_reward(imag_state)
         reward_expl = self.expl_reward(imag_feat, imag_state, imag_action)
         reward_goal = self.goal_reward(imag_feat, imag_state, imag_action, imag_goals)
+
+        reward_expl = reward_expl.unsqueeze(-1)
+        reward_goal = reward_goal.unsqueeze(-1)
 
         # The rollout needs to be split two ways. 
         # The manager takes every kth step and sums the weighted rewards for 0 to k-1
@@ -424,20 +442,46 @@ class HierarchyBehavior(nn.Module):
             "cont": torch.zeros(list(imag_action.shape[:-1]) + [1]) #TODO: Need to get continuation binary values. Are these from raw data? or is there an imaginary continuation?
         }
 
+        for k,v in traj.items():
+            print(f"{k}: {v.shape}")
+
+        # worker trajecory must be split into goal horizon length chunks
         wtraj = self.split_traj(traj)
+
+        # manager trajectory must be split to only include the goal selection steps and sum reward between them
         mtraj = self.abstract_traj(traj)
 
-
         ## Goal autoencoder
-        # conver the horizon, batchsteps, feat0, feat1 to horizon, batchsteps, feat0*feat1
-        # imag_stoch = imag_state["stoch"].reshape(imag_state["stoch"].shape[0], imag_state["stoch"].shape[1], -1)
-
         imag_gc_feat = torch.cat([imag_feat, imag_goals], dim=-1)
         actor_ent = self.worker(imag_gc_feat).entropy()
-        mgr_ent = self.manager(imag_feat).entropy()
+        mgr_ent = self.manager_actor(imag_state["deter"]).entropy()
         state_ent = self._world_model.dynamics.get_dist(imag_state).entropy()
         # this target is not scaled
         # slow is flag to indicate whether slow_target is used for lambda-return
+        def ac_loss(traj):        
+            pass
+        
+        def ac_update(traj):
+            metrics = {}
+            ## Update the critics
+            expl_reward = traj["reward_expl"]
+            extr_reward = traj["reward_extr"]
+            goal_reward = traj["reward_goal"]
+            actions = traj["action"]
+
+            assert len(expl_reward) == (len(actions) - 1)
+            assert len(extr_reward) == (len(actions) - 1)
+            assert len(goal_reward) == (len(actions) - 1)
+
+            disc = traj['cont'][1:] * self.config.discount
+
+            # self.manager_exploration_value
+            # self.manager_extrinsic_value
+
+            ## Update the actor
+
+        print(f"hierarchy::_train"); ipshell()
+
         manager_extrinsic_target, weights, base = self._compute_manager_target(
             imag_feat, imag_state, imag_action, reward_extr, mgr_ent, state_ent
         )
@@ -505,7 +549,7 @@ class HierarchyBehavior(nn.Module):
             metrics.update(tools.tensorstats(imag_action, "imag_action"))
         metrics["actor_entropy"] = to_np(torch.mean(actor_ent))
         with tools.RequiresGrad(self):
-            metrics.update(self._manager_opt(manager_loss, self.manager.parameters()))
+            metrics.update(self._manager_opt(manager_loss, self.manager_actor.parameters()))
             metrics.update(self._manager_extr_opt(mgr_extr_value_loss, self.manager_extrinsic_value.parameters()))
         return imag_feat, imag_state, imag_action, weights, metrics
     
@@ -552,7 +596,7 @@ class HierarchyBehavior(nn.Module):
 
         feat = dynamics.get_feat(start)
         inp = feat.detach() if self._stop_grad_actor else feat
-        goal = self.manager(inp).sample()
+        goal = self.sample_goal(start["deter"])
 
         inp = torch.cat([inp, goal], -1)
         action = policy(inp).sample()
@@ -569,7 +613,7 @@ class HierarchyBehavior(nn.Module):
 
             # NOTE: step is ignored in original code. does it mess with the flatten?
             if goal is None or step % self._config.train_skill_duration == 0:
-                goal = self.manager(inp).sample()
+                goal = self.sample_goal(state["deter"])
 
             inp = torch.cat([inp, goal], -1)
 
@@ -655,6 +699,11 @@ class HierarchyBehavior(nn.Module):
             metrics["actor_state_entropy"] = to_np(torch.mean(state_entropy))
         actor_loss = -torch.mean(weights[:-1] * actor_target)
         return actor_loss, metrics
+    
+    def sample_goal(self, deter):
+        goal = self.manager_actor(deter).sample().reshape(-1, np.product(self._config.skill_shape))
+        return self.goal_dec(goal).mode()
+        
 
     def _update_slow_target(self):
         if self._config.slow_value_target:

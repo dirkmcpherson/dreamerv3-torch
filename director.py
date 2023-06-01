@@ -141,7 +141,7 @@ class Director(nn.Module):
         # is it time to select a new goal?
         if self._step % self._config.train_skill_duration:
             # NOTE: We should keep a count that starts from 0 when tasks start
-            goal = self._alt_behavior.manager(feat).mode()
+            goal = self._alt_behavior.sample_goal(latent["deter"])
         
         gc_feat = torch.cat([feat, goal], dim=-1)
 
