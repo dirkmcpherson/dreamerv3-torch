@@ -93,14 +93,25 @@ class Director(nn.Module):
                 self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
-            if self._should_log(step):
+            if self._should_log(step) or self._config.debug_always_update:
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
                 if self._config.video_pred_log:
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
+
+                    truth, model, error = self._alt_behavior.goal_pred(next(self._dataset))
+
+                    # decoded_goals = to_np(truth).reshape(-1, 3, 64, 64)
+                    # self._logger.batch_images("train_goal_truth", to_np(truth))
+                    # self._logger.batch_images("train_goal_model", to_np(model))
+                    # self._logger.batch_images("train_goal_error", to_np(error))
+
+                    wtf = torch.cat([truth, model, error], dim=2) # concat along height
+                    self._logger.batch_images("train_goal", to_np(wtf))
                 self._logger.write(fps=True)
+                print(f"Step {self._step}. Logged.")
 
         policy_output, state = self._policy(obs, state, training)
 
@@ -128,7 +139,7 @@ class Director(nn.Module):
         feat = self._wm.dynamics.get_feat(latent)
         
         # is it time to select a new goal?
-        if self._step % self._config.goal_change_interval:
+        if self._step % self._config.train_skill_duration:
             # NOTE: We should keep a count that starts from 0 when tasks start
             goal = self._alt_behavior.manager(feat).mode()
         
@@ -179,17 +190,17 @@ class Director(nn.Module):
         raise NotImplementedError(self._config.action_noise)
 
     def _train(self, data):
-        # print(f"Director::_train"); ipshell(); 
         metrics = {}
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
         start = post
         # start['deter'] (16, 64, 512)
-        reward = lambda f, s, a: self._wm.heads["reward"](
+        extr_reward_fn = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
-        metrics.update(self._task_behavior._train(start, reward)[-1])
-        metrics.update(self._alt_behavior._train(start, reward)[-1])
+        # print(f"director::_train"); ipshell()
+        metrics.update(self._task_behavior._train(start, extr_reward_fn)[-1])
+        metrics.update(self._alt_behavior._train(start, context)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
@@ -385,7 +396,6 @@ def main(config):
         logger,
         train_dataset,
     ).to(config.device)
-    # ipshell()
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest_model.pt").exists():
         agent.load_state_dict(torch.load(logdir / "latest_model.pt"))

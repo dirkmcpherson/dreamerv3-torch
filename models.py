@@ -6,6 +6,7 @@ from PIL import ImageColor, Image, ImageDraw, ImageFont
 
 import networks
 import tools
+from IPython import embed as ipshell
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -124,7 +125,7 @@ class WorldModel(nn.Module):
         with tools.RequiresGrad(self):
             with torch.cuda.amp.autocast(self._use_amp):
                 embed = self.encoder(data)
-                post, prior = self.dynamics.observe(
+                post, prior = self.dynamics.observe( # (s_t|s_t-1, a_t-1, x_t), (s^_t|s_t-1, a_t-1)
                     embed, data["action"], data["is_first"]
                 )
                 kl_free = tools.schedule(self._config.kl_free, self._step)
@@ -211,6 +212,7 @@ class WorldModel(nn.Module):
         model = model + 0.5
         error = (model - truth + 1.0) / 2.0
 
+        # print(f"models::video_pred"); ipshell()
         return torch.cat([truth, model, error], 2)
 
 

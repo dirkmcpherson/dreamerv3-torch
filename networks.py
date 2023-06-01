@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import distributions as torchd
 
 import tools
-
+from IPython import embed as ipshell
 
 class RSSM(nn.Module):
     def __init__(
@@ -269,6 +269,7 @@ class RSSM(nn.Module):
         else:
             stoch = self.get_dist(stats).mode()
         prior = {"stoch": stoch, "deter": deter, **stats}
+        # print(f"rssm::img_step"); ipshell(); exit()
         return prior
 
     def get_stoch(self, deter):
@@ -313,6 +314,7 @@ class RSSM(nn.Module):
         dist = lambda x: self.get_dist(x)
         sg = lambda x: {k: v.detach() for k, v in x.items()}
 
+        # print(f"rssm::kl_loss"); ipshell()
         rep_loss = value = kld(
             dist(post) if self._discrete else dist(post)._dist,
             dist(sg(prior)) if self._discrete else dist(sg(prior))._dist,
@@ -325,6 +327,7 @@ class RSSM(nn.Module):
         dyn_loss = torch.mean(torch.clip(dyn_loss, min=free))
         loss = dyn_scale * dyn_loss + rep_scale * rep_loss
 
+        # print(f"rssm::kl_loss"); ipshell();
         return loss, value, dyn_loss, rep_loss
 
 
@@ -687,6 +690,11 @@ class MLP(nn.Module):
                 std = self.std_layer(out)
             else:
                 std = self._std
+            
+            if (len(self._shape) == 2):
+                assert self._dist == "onehot", "only onehot is supported for 2d shape"
+                mean = mean.reshape(mean.shape[:-1] + self._shape)
+
             return self.dist(self._dist, mean, std, self._shape)
 
     def dist(self, dist, mean, std, shape):
@@ -707,6 +715,10 @@ class MLP(nn.Module):
                 torchd.independent.Independent(
                     torchd.bernoulli.Bernoulli(logits=mean), len(shape)
                 )
+            )
+        if dist == "onehot":
+            return torch.distributions.independent.Independent(
+                tools.OneHotDist(logits=mean, unimix_ratio=0.0), 1
             )
         if dist == "symlog_disc":
             return tools.DiscDist(logits=mean, device=self._device)

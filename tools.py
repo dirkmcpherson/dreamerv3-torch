@@ -63,6 +63,7 @@ class Logger:
         self._last_time = None
         self._scalars = {}
         self._images = {}
+        self._batch_images = {}
         self._videos = {}
         self.step = step
 
@@ -71,6 +72,9 @@ class Logger:
 
     def image(self, name, value):
         self._images[name] = np.array(value)
+
+    def batch_images(self, name, value):
+        self._batch_images[name] = np.array(value)
 
     def video(self, name, value):
         self._videos[name] = np.array(value)
@@ -88,6 +92,10 @@ class Logger:
             self._writer.add_scalar("scalars/" + name, value, step)
         for name, value in self._images.items():
             self._writer.add_image(name, value, step)
+        for name, value in self._batch_images.items():
+            B, T, H, W, C = value.shape
+            write_val = value.transpose(0, 1, 4, 2, 3).reshape((1, B*T, C, H, W))[0, :]
+            self._writer.add_images(name, write_val, step)
         for name, value in self._videos.items():
             name = name if isinstance(name, str) else name.decode("utf-8")
             if np.issubdtype(value.dtype, np.floating):
@@ -99,6 +107,7 @@ class Logger:
         self._writer.flush()
         self._scalars = {}
         self._images = {}
+        self._batch_images = {}
         self._videos = {}
 
     def _compute_fps(self, step):
@@ -616,6 +625,7 @@ class Optimizer:
         assert len(loss.shape) == 0, loss.shape
         metrics = {}
         metrics[f"{self._name}_loss"] = loss.detach().cpu().numpy()
+        # print(f"backwards on {self._name}")
         self._scaler.scale(loss).backward()
         self._scaler.unscale_(self._opt)
         # loss.backward(retain_graph=retain_graph)
