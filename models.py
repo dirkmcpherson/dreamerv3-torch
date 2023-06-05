@@ -404,6 +404,12 @@ class ImagBehavior(nn.Module):
         # value(15, 960, ch)
         # action(15, 960, ch)
         # discount(15, 960, ch)
+        print(f"dreamerv3")
+        print("\timag_feat", imag_feat.shape)
+        print("\timag_action", imag_action.shape)
+        print("\tdiscount", discount.shape)
+        print("\tvalue", value.shape)
+        print("\treward", reward.shape)
         target = tools.lambda_return(
             reward[:-1],
             value[:-1],

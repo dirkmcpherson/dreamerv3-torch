@@ -141,7 +141,7 @@ class Director(nn.Module):
         # is it time to select a new goal?
         if self._step % self._config.train_skill_duration:
             # NOTE: We should keep a count that starts from 0 when tasks start
-            goal = self._alt_behavior.sample_goal(latent["deter"])
+            goal = self._alt_behavior.sample_goal(feat)
         
         gc_feat = torch.cat([feat, goal], dim=-1)
 
@@ -150,7 +150,7 @@ class Director(nn.Module):
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
 
-            worker = self._alt_behavior.worker(gc_feat)
+            worker = self._alt_behavior.worker.actor(gc_feat)
             action = worker.mode()
 
         elif self._should_expl(self._step):
@@ -163,7 +163,7 @@ class Director(nn.Module):
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
 
-            worker = self._alt_behavior.worker(gc_feat)
+            worker = self._alt_behavior.worker.actor(gc_feat)
             action = worker.sample()
 
         logprob = actor.log_prob(action)
@@ -194,13 +194,14 @@ class Director(nn.Module):
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
         start = post
+        ipshell()
         # start['deter'] (16, 64, 512)
         extr_reward_fn = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
         # print(f"director::_train"); ipshell()
         metrics.update(self._task_behavior._train(start, extr_reward_fn)[-1])
-        metrics.update(self._alt_behavior._train(start, context)[-1])
+        metrics.update(self._alt_behavior._train(start)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})

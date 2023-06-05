@@ -767,13 +767,18 @@ class ActionHead(nn.Module):
         self._pre_layers = nn.Sequential(*pre_layers)
         self._pre_layers.apply(tools.weight_init)
 
-        if self._dist in ["tanh_normal", "tanh_normal_5", "normal", "trunc_normal"]:
-            self._dist_layer = nn.Linear(self._units, 2 * self._size)
-            self._dist_layer.apply(tools.uniform_weight_init(outscale))
-
-        elif self._dist in ["normal_1", "onehot", "onehot_gumbel"]:
-            self._dist_layer = nn.Linear(self._units, self._size)
-            self._dist_layer.apply(tools.uniform_weight_init(outscale))
+        if isinstance(self._size, tuple):
+            if self._dist != "onehot":
+                print(f"only onehot is supported for 2d shape. got {self._dist}")
+                raise NotImplementedError()
+            self._dist_layer = nn.Linear(self._units, np.prod(self._size))
+        else:
+            if self._dist in ["tanh_normal", "tanh_normal_5", "normal", "trunc_normal"]:
+                self._dist_layer = nn.Linear(self._units, 2 * self._size)
+                self._dist_layer.apply(tools.uniform_weight_init(outscale))
+            elif self._dist in ["normal_1", "onehot", "onehot_gumbel"]:
+                self._dist_layer = nn.Linear(self._units, self._size)
+                self._dist_layer.apply(tools.uniform_weight_init(outscale))
 
     def forward(self, features, dtype=None):
         x = features
