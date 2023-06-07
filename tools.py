@@ -153,6 +153,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
             reward = [reward[i] * (1 - done[i]) for i in range(len(envs))]
         # Step agents.
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0]}
+        from IPython import embed as ipshell
         action, agent_state = agent(obs, done, agent_state, reward)
         if isinstance(action, dict):
             action = [

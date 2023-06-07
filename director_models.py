@@ -24,16 +24,6 @@ class HierarchyBehavior(nn.Module):
         self._world_model = world_model
         self._stop_grad_actor = stop_grad_actor
 
-        if config.dyn_discrete:
-            z_dim = config.dyn_stoch * config.dyn_discrete # (z_stoch * z_discrete)
-            feat_size = z_dim + config.dyn_deter # z_state + h
-            gc_feat_size = z_dim + config.dyn_deter + z_dim # z_state + h + z_goal
-            # feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter + # z_stoch * z_discrete + h + z_goal
-        else:
-            raise NotImplementedError
-
-        
-
         # NOTE: The RSSM has MLPs that support a nxn goal space. Use that to figure out why this isn't working. 
 
         # the goal autencoder converts the feature representation (h? 1024?) to a one-hot of the goal
@@ -116,40 +106,6 @@ class HierarchyBehavior(nn.Module):
         # return model
         # print(f"director_models::goal_pred"); ipshell()
         return truth, model, error
-
-
-    def _compute_manager_target(
-        self, imag_feat, imag_state, imag_action, extr_reward, actor_ent, state_ent
-    ):
-        '''
-        Compute the manager extrinsic target, which is the lamda-return over the horizon
-        '''
-        if "cont" in self._world_model.heads:
-            inp = self._world_model.dynamics.get_feat(imag_state)
-            discount = self._config.discount * self._world_model.heads["cont"](inp).mean
-        else:
-            discount = self._config.discount * torch.ones_like(extr_reward)
-        if self._config.future_entropy and self._config.actor_entropy() > 0:
-            extr_reward += self._config.actor_entropy() * actor_ent
-        if self._config.future_entropy and self._config.actor_state_entropy() > 0:
-            extr_reward += self._config.actor_state_entropy() * state_ent
-        value = self.manager_extrinsic_value(imag_feat).mode()
-        # value(15, 960, ch)
-        # action(15, 960, ch)
-        # discount(15, 960, ch)
-        target = tools.lambda_return(
-            extr_reward[:-1],
-            value[:-1],
-            discount[:-1],
-            bootstrap=value[-1],
-            lambda_=self._config.discount_lambda,
-            axis=0,
-        )
-        weights = torch.cumprod(
-            torch.cat([torch.ones_like(discount[:1]), discount[:-1]], 0), 0
-        ).detach()
-        # print(f"director_models::_compute_manager_target"); ipshell()
-        return target, weights, value[:-1]
     
     def extr_reward(self, state):
         # extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mode() # NOTE: Original uses mean()[1:] 
@@ -165,16 +121,7 @@ class HierarchyBehavior(nn.Module):
         x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
         dec = self.goal_dec(x)
 
-        # ll = dec.log_prob(feat)
-        # kl = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-
         return ((dec.mode() - feat) ** 2).mean(-1)[1:] # NOTE: This can probably be a log likelihood under the MSE distribution
-        # context = tf.repeat(feat[0][None], 1 + self.config.imag_horizon, 0)
-        # enc = self.enc({'goal': feat, 'context': context})
-        # dec = self.dec({'skill': enc.sample(), 'context': context})
-        # ll = dec.log_prob(feat)
-        # kl = tfd.kl_divergence(enc, self.prior)
-        # return ((dec.mode() - feat) ** 2).mean(-1)[1:]
 
     def goal_reward(self, feat, state, action, goal):
         # cosine_max reward
@@ -210,7 +157,7 @@ class HierarchyBehavior(nn.Module):
 
     def abstract_traj(self, orig_traj):
         traj = orig_traj.copy()
-        traj["action"] = traj.pop("goal")
+        traj["action"] = traj.pop("skill")
         k = self._config.train_skill_duration
         reshape = lambda x: x.reshape([x.shape[0] // k, k] + list(x.shape[1:]))
         weights = torch.cumprod(reshape(traj["cont"][:-1]), 1).to(self._config.device)
@@ -278,7 +225,7 @@ class HierarchyBehavior(nn.Module):
         # with tools.RequiresGrad(self.manager): # NOTE: The worker needs a grad too, how do these two interact?
         #     with torch.cuda.amp.autocast(self._use_amp):
         # Given the output world model starting state, do imagined rollouts at each step with the worker's action policy 
-        imag_feat, imag_state, imag_action, imag_goals = self._imagine_carry(
+        imag_feat, imag_state, imag_action, imag_skills, imag_goals = self._imagine_carry(
             start, self.worker.actor, self._config.imag_horizon, repeats
         )
 
@@ -305,15 +252,14 @@ class HierarchyBehavior(nn.Module):
             "reward_expl": reward_expl,
             "reward_goal": reward_goal,
             "goal": imag_goals,
+            "skill": imag_skills,
             "cont": torch.zeros(list(imag_action.shape[:-1]) + [1]) #TODO: Need to get continuation binary values. Are these from raw data? or is there an imaginary continuation?
         }
 
-        ipshell()
-
-        for k,v in traj.items():
-            print(f"{k}: {v.shape if hasattr(v, 'shape') else 'None'}")
-            # batch, time, feature -> time, batch, feature
-            traj[k] = v.permute(1,0)
+        if (self._config.debug):
+            print(f"Director")
+            for k,v in traj.items():
+                print(f"\t{k}: {v.shape if hasattr(v, 'shape') else 'None'}")
 
         # worker trajecory must be split into goal horizon length chunks
         wtraj = self.split_traj(traj)
@@ -325,28 +271,31 @@ class HierarchyBehavior(nn.Module):
         mtraj["reward"] = self._config.expl_reward_weight * mtraj["reward_expl"] + self._config.extr_reward_weight * mtraj["reward_extr"] # TODO: Weight rewards
         mtraj["state"] = {"stoch": mtraj["stoch"], "deter": mtraj["deter"], "logit": mtraj["logit"]}
 
-        print(f"original action dim: {imag_action.shape} --> {wtraj['action'].shape}")
-        print(f"                     {imag_action.shape} --> {mtraj['action'].shape}")
+        if (self._config.debug):
+            print(f"original action dim: {imag_action.shape} --> {wtraj['action'].shape} worker")
+            print(f"                     {imag_action.shape} --> {mtraj['action'].shape} manager")
 
-        print(f"Manager Traj")
-        for key, value in list(mtraj.items()):
-            if key == "action":
-                old = traj["goal"]
-            elif key not in traj:
-                print(f"\t{key} shape:  None --> {value.shape if hasattr(value, 'shape') else 'None'}")
-                continue
-            else:
-                old = traj[key]
-            print(f"\t{key} shape:  {old.shape} --> {value.shape}")
-            
-        print(f"Worker Traj")
-        for key, value in list(wtraj.items()):
-            if key not in traj:
-                print(f"\t{key} shape:  None --> {value.shape if hasattr(value, 'shape') else 'None'}")
-                continue
-            else:
-                old = traj[key]
-            print(f"\t{key} shape:  {old.shape} --> {value.shape}")
+            print(f"Manager Traj")
+            for key, value in list(mtraj.items()):
+                if key == "action":
+                    old = traj["skill"]
+                elif key not in traj:
+                    print(f"\t{key} shape:  None --> {value.shape if hasattr(value, 'shape') else 'None'}")
+                    continue
+                else:
+                    old = traj[key]
+                print(f"\t{key} shape:  {old.shape} --> {value.shape}")
+                
+            print(f"Worker Traj")
+            for key, value in list(wtraj.items()):
+                if key not in traj:
+                    print(f"\t{key} shape:  None --> {value.shape if hasattr(value, 'shape') else 'None'}")
+                    continue
+                else:
+                    old = traj[key]
+                print(f"\t{key} shape:  {old.shape} --> {value.shape}")
+
+
 
         metrics.update(self.manager._train(imag_traj=mtraj)[-1])
         metrics.update(self.worker._train(imag_traj=wtraj)[-1])
@@ -396,7 +345,7 @@ class HierarchyBehavior(nn.Module):
 
         feat = dynamics.get_feat(start)
         inp = feat.detach() if self._stop_grad_actor else feat
-        goal = self.sample_goal(feat)
+        skill, goal = self.sample_goal(feat)
 
         inp = torch.cat([inp, goal], -1)
         action = policy(inp).sample()
@@ -404,16 +353,17 @@ class HierarchyBehavior(nn.Module):
         actions = [action]
         states = start
         feats = [feat]
+        skills = [skill]
         goals = [goal]
 
         def step(prev, step):
-            state, _, _, goal = prev
+            state, _, _, skill, goal = prev
             feat = dynamics.get_feat(state) # z_state + h
             inp = feat.detach() if self._stop_grad_actor else feat
 
             # NOTE: step is ignored in original code. does it mess with the flatten?
             if goal is None or step % self._config.train_skill_duration == 0:
-                goal = self.sample_goal(feat)
+                skill, goal = self.sample_goal(feat)
 
             inp = torch.cat([inp, goal], -1)
 
@@ -421,10 +371,10 @@ class HierarchyBehavior(nn.Module):
 
             # print(f"director_models::_imagine::step"); ipshell()
             succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
-            return succ, feat, action, goal
+            return succ, feat, action, skill, goal
 
-        succ, sc_feats, sc_actions, sc_goals = tools.static_scan(
-            step, [torch.arange(horizon)], (start, None, None, goal)
+        succ, sc_feats, sc_actions, sc_skills, sc_goals = tools.static_scan(
+            step, [torch.arange(horizon)], (start, None, None, skill, goal)
         )
         sc_states = {k: torch.cat([start[k].unsqueeze(0), v[:-1]], 0) for k, v in succ.items()}
         if repeats:
@@ -433,6 +383,7 @@ class HierarchyBehavior(nn.Module):
         feats = torch.cat([torch.stack(feats), sc_feats], dim=0)
         actions = torch.cat([torch.stack(actions), sc_actions], dim=0)
         goals = torch.cat([torch.stack(goals), sc_goals], dim=0)
+        skills = torch.cat([torch.stack(skills), sc_skills], dim=0)
         for k,v in sc_states.items():
             states[k] = torch.cat([states[k].unsqueeze(0), v], dim=0)
 
@@ -440,68 +391,12 @@ class HierarchyBehavior(nn.Module):
         #     print(f"feat: {f.shape}, state: {s.shape}, action: {a.shape}, goal: {g.shape} IDX: {idx}")
 
         # print(f"director_models::_imagine"); ipshell()
-        return feats, states, actions, goals
-
-    
-    def _compute_manager_loss(
-        self,
-        imag_feat,
-        imag_state,
-        imag_action,
-        target,
-        actor_ent,
-        state_ent,
-        weights,
-        base,
-    ):
-        metrics = {}
-        inp = imag_feat.detach() if self._stop_grad_actor else imag_feat
-        policy = self.manager(inp)
-        # policy = self.actor(inp)
-        actor_ent = policy.entropy()
-        # Q-val for actor is not transformed using symlog
-        target = torch.stack(target, dim=1)
-        if self._config.reward_EMA:
-            offset, scale = self.reward_ema(target)
-            normed_target = (target - offset) / scale
-            normed_base = (base - offset) / scale
-            adv = normed_target - normed_base
-            metrics.update(tools.tensorstats(normed_target, "normed_target"))
-            values = self.reward_ema.values
-            metrics["EMA_005"] = to_np(values[0])
-            metrics["EMA_095"] = to_np(values[1])
-
-        if self._config.imag_gradient == "dynamics":
-            actor_target = adv
-        elif self._config.imag_gradient == "reinforce":
-            actor_target = (
-                policy.log_prob(imag_action)[:-1][:, :, None]
-                * (target - self.manager_extrinsic_value(imag_feat[:-1]).mode()).detach()
-            )
-        elif self._config.imag_gradient == "both":
-            actor_target = (
-                policy.log_prob(imag_action)[:-1][:, :, None]
-                * (target - self.manager_extrinsic_value(imag_feat[:-1]).mode()).detach()
-            )
-            mix = self._config.imag_gradient_mix()
-            actor_target = mix * target + (1 - mix) * actor_target
-            metrics["imag_gradient_mix"] = mix
-        else:
-            raise NotImplementedError(self._config.imag_gradient)
-        if not self._config.future_entropy and (self._config.actor_entropy() > 0):
-            actor_entropy = self._config.actor_entropy() * actor_ent[:-1][:, :, None]
-            actor_target += actor_entropy
-            metrics["actor_entropy"] = to_np(torch.mean(actor_entropy))
-        if not self._config.future_entropy and (self._config.actor_state_entropy() > 0):
-            state_entropy = self._config.actor_state_entropy() * state_ent[:-1]
-            actor_target += state_entropy
-            metrics["actor_state_entropy"] = to_np(torch.mean(state_entropy))
-        actor_loss = -torch.mean(weights[:-1] * actor_target)
-        return actor_loss, metrics
+        return feats, states, actions, skills, goals
     
     def sample_goal(self, feat):
-        goal = self.manager.actor(feat).sample().reshape(-1, np.product(self._config.skill_shape))
-        return self.goal_dec(goal).mode()
+        skill = self.manager.actor(feat).sample().reshape(-1, np.product(self._config.skill_shape))
+        goal = self.goal_dec(skill).mode()
+        return skill, goal
 
 class ImagActorCritic(nn.Module):
     def __init__(self, config, world_model, input_shape, num_actions, stop_grad_actor=True, prefix=''):
@@ -513,9 +408,15 @@ class ImagActorCritic(nn.Module):
         self._prefix = prefix
 
         if prefix == "manager":
-            actor_kw = config.manager_actor
+            actor_act = config.manager_actor['act']
+            actor_norm = config.manager_actor['norm']
+            actor_dist = config.manager_actor['dist']
+            actor_outscale = config.manager_actor['outscale']
         elif prefix == "worker":
-            actor_kw = config.worker_actor
+            actor_act = config.act
+            actor_norm = config.norm
+            actor_dist = config.actor_dist
+            actor_outscale = 1.0
         else:
             raise NotImplementedError(prefix)
 
@@ -524,14 +425,14 @@ class ImagActorCritic(nn.Module):
             num_actions,
             config.actor_layers,
             config.units,
-            actor_kw['act'],
-            actor_kw['norm'],
-            actor_kw['dist'],
+            actor_act,
+            actor_norm,
+            actor_dist,
             config.actor_init_std,
             config.actor_min_std,
             config.actor_max_std,
             config.actor_temp,
-            outscale=actor_kw['outscale'],
+            outscale=actor_outscale,
             unimix_ratio=config.action_unimix_ratio,
         )
         
@@ -638,7 +539,7 @@ class ImagActorCritic(nn.Module):
                 # this target is not scaled
                 # slow is flag to indicate whether slow_target is used for lambda-return
                 target, weights, base = self._compute_target(
-                    imag_feat, imag_state, imag_action, imag_goal, imag_reward, actor_ent, state_ent
+                    imag_feat, imag_state, imag_action, imag_goal, imag_reward, self.calc_value, actor_ent, state_ent
                 )
                 actor_loss, mets = self._compute_actor_loss(
                     imag_feat,
@@ -652,16 +553,21 @@ class ImagActorCritic(nn.Module):
                     base,
                 )
                 metrics.update(mets)
-                value_input = imag_feat
+                value_input = imag_feat if self._prefix == "manager" else torch.cat([imag_feat, imag_goal], dim=-1)
 
         with tools.RequiresGrad(self.value):
             with torch.cuda.amp.autocast(self._use_amp):
+                value_fn = lambda x: self.value(x).mode()
+                extr_target, extr_weights, _ = self._compute_target(
+                    imag_feat, imag_state, imag_action, imag_goal, imag_traj["reward_extr"], value_fn, actor_ent, state_ent
+                )
                 # value = self.value(value_input[:-1].detach())
-                value = self.value(value_input[:-1].detach())
-                target = torch.stack(target, dim=1)
+                value = self.value(value_input[1:].detach()) # NOTE: This calculation is also done in compute_target
+                extr_target = torch.stack(extr_target, dim=1)
                 # (time, batch, 1), (time, batch, 1) -> (time, batch)
-                value_loss = -value.log_prob(target.detach())
-                slow_target = self._slow_value(value_input[:-1].detach())
+                value_loss = -value.log_prob(extr_target.detach())
+                slow_target = self._slow_value(value_input[1:].detach())
+                # slow_target = self._slow_value(value_input[:-1].detach())
                 if self._config.slow_value_target:
                     value_loss = value_loss - value.log_prob(
                         slow_target.mode().detach()
@@ -669,17 +575,21 @@ class ImagActorCritic(nn.Module):
                 if self._config.value_decay:
                     value_loss += self._config.value_decay * value.mode()
                 # (time, batch, 1), (time, batch, 1) -> (1,)
-                value_loss = torch.mean(weights[:-1] * value_loss[:, :, None])
+                value_loss = torch.mean(extr_weights[1:] * value_loss[:, :, None])
+                # value_loss = torch.mean(extr_weights[:-1] * value_loss[:, :, None])
 
         if self.expl_value is not None:
             with tools.RequiresGrad(self.expl_value):
                 with torch.cuda.amp.autocast(self._use_amp):
-                    # value = self.value(value_input[:-1].detach())
-                    expl_value = self.expl_value(value_input[:-1].detach())
-                    target = torch.stack(target, dim=1)
+                    value_fn = lambda x: self.expl_value(x).mode()
+                    expl_target, expl_weights, _ = self._compute_target(
+                        imag_feat, imag_state, imag_action, imag_goal, imag_traj["reward_expl"], value_fn, actor_ent, state_ent
+                    )
+                    expl_value = self.expl_value(value_input[1:].detach())
+                    expl_target = torch.stack(expl_target, dim=1)
                     # (time, batch, 1), (time, batch, 1) -> (time, batch)
-                    expl_value_loss = -expl_value.log_prob(target.detach())
-                    slow_target = self._slow_value_expl(value_input[:-1].detach())
+                    expl_value_loss = -expl_value.log_prob(expl_target.detach())
+                    slow_target = self._slow_value_expl(value_input[1:].detach())
                     if self._config.slow_value_target:
                         expl_value_loss = expl_value_loss - expl_value.log_prob(
                             slow_target.mode().detach()
@@ -687,14 +597,19 @@ class ImagActorCritic(nn.Module):
                     if self._config.value_decay:
                         expl_value_loss += self._config.value_decay * expl_value.mode()
                     # (time, batch, 1), (time, batch, 1) -> (1,)
-                    expl_value_loss = torch.mean(weights[:-1] * expl_value_loss[:, :, None])
+                    expl_value_loss = torch.mean(expl_weights[1:] * expl_value_loss[:, :, None])
+                    # expl_value_loss = torch.mean(expl_weights[:-1] * expl_value_loss[:, :, None])
 
         metrics.update(tools.tensorstats(value.mode(), "value"))
+        metrics.update(tools.tensorstats(value_loss, "value_loss"))
+        target = torch.stack(target, dim=1)
         metrics.update(tools.tensorstats(target, "target"))
+        metrics.update(tools.tensorstats(extr_target, "extr_target"))
         if self.expl_value is not None:
             metrics.update(tools.tensorstats(expl_value.mode(), "expl_value"))
             metrics.update(tools.tensorstats(expl_value_loss, "expl_value_loss"))
-        metrics.update(tools.tensorstats(reward, "imag_reward"))
+            metrics.update(tools.tensorstats(expl_target, "expl_target"))
+        metrics.update(tools.tensorstats(imag_reward, "imag_reward"))
         if self._config.actor_dist in ["onehot"]:
             metrics.update(
                 tools.tensorstats(
@@ -736,7 +651,7 @@ class ImagActorCritic(nn.Module):
         return feats, states, actions
 
     def _compute_target(
-        self, imag_feat, imag_state, imag_action, imag_goal, reward, actor_ent, state_ent
+        self, imag_feat, imag_state, imag_action, imag_goal, reward, value_fn, actor_ent, state_ent
     ):
         if "cont" in self._world_model.heads:
             inp = self._world_model.dynamics.get_feat(imag_state)
@@ -755,17 +670,19 @@ class ImagActorCritic(nn.Module):
         else:
             raise NotImplementedError(self._prefix)
         
-        value = self.calc_value(inp)
-        # value = self.value(inp).mode()
+        value = value_fn(inp) # pass in a value function so we can compute the target for separate value networks # NOTE: DHafner def does this better
+        # value = self.value(inp).mode() 
         # if self.expl_value is not None:
         #     value = value + self.expl_value(inp).mode()
         # value(15, 960, ch)
         # action(15, 960, ch)
         # discount(15, 960, ch)
-        target = tools.lambda_return(
-            reward[:-1],
-            value[:-1],
-            discount[:-1],
+        # NOTE: value and discount start from one to match DHafner. Likely to align with norm to have a reward be the consequence of an early state-action rather than the current step's state-action.
+        # NOTE: This is a departure from this repo's implementation of the lambda return which ignore the last index. Keep a lookout for other places that make ths same assumption
+        target = tools.lambda_return( 
+            reward, 
+            value[1:],
+            discount[1:],
             bootstrap=value[-1],
             lambda_=self._config.discount_lambda,
             axis=0,
@@ -773,7 +690,7 @@ class ImagActorCritic(nn.Module):
         weights = torch.cumprod(
             torch.cat([torch.ones_like(discount[:1]), discount[:-1]], 0), 0
         ).detach()
-        return target, weights, value[:-1]
+        return target, weights, value[1:] # see note above about lining up value and reward
 
     def calc_value(self, inp):
         value = self._config.extr_reward_weight*self.value(inp).mode()
@@ -815,19 +732,20 @@ class ImagActorCritic(nn.Module):
             metrics["EMA_005"] = to_np(values[0])
             metrics["EMA_095"] = to_np(values[1])
 
-        if self._config.imag_gradient == "dynamics":
+        if self._config.imag_gradient == "dynamics": # NOTE: "backprop" in DHafner
             actor_target = adv
         elif self._config.imag_gradient == "reinforce":
-            actor_target = (
-                policy.log_prob(imag_action)[:-1][:, :, None]
+            actor_target = ( # NOTE: these leave out the last action instead of the first. Conflicts with the changes to _calculate_target?
+                # policy.log_prob(imag_action)[:-1][:, :, None]
                 # * (target - self.value(imag_feat[:-1]).mode()).detach()
-                * (target - self.calc_value(imag_feat[:-1])).detach()
+                policy.log_prob(imag_action)[1:][:, :, None]
+                * (target - self.calc_value(inp[1:])).detach()
             )
         elif self._config.imag_gradient == "both":
             actor_target = (
                 policy.log_prob(imag_action)[:-1][:, :, None]
                 # * (target - self.value(imag_feat[:-1]).mode()).detach()
-                * (target - self.calc_value(imag_feat[:-1])).detach()
+                * (target - self.calc_value(inp[1:])).detach()
             )
             mix = self._config.imag_gradient_mix()
             actor_target = mix * target + (1 - mix) * actor_target
@@ -841,7 +759,8 @@ class ImagActorCritic(nn.Module):
             state_entropy = self._config.actor_state_entropy() * state_ent[:-1]
             actor_target += state_entropy
             metrics["actor_state_entropy"] = to_np(torch.mean(state_entropy))
-        actor_loss = -torch.mean(weights[:-1] * actor_target)
+        # actor_loss = -torch.mean(weights[:-1] * actor_target)
+        actor_loss = -torch.mean(weights[1:] * actor_target)
 
         prefixxed_metrics = {}
         for k,v in metrics.items():

@@ -7,9 +7,9 @@ defaults:
   offline_evaldir: ''
   seed: 0
   steps: 1e6
-  eval_every: 1e4
-  eval_episode_num: 1 #10
-  log_every: 5e3 #1e4
+  eval_every: 5e3 # 1e4
+  eval_episode_num: 10
+  log_every: 1e4
   reset_every: 0
   device: 'cuda:0'
   compile: True
@@ -129,7 +129,7 @@ defaults:
 
   actor: {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1}
 
-  goal_ae_layers: 2
+  goal_ae_layers: 4
   goal_ae_units: 512
   goal_ae_grad_clip: 100
   goal_ae_lr: 3e-5
@@ -140,7 +140,7 @@ defaults:
   train_skill_duration: 8
 
   # Director Debugs
-  debug_only_goal_ae: True
+  debug_only_goal_ae: False
   debug_always_update: False
 
   # Exploration
@@ -190,3 +190,4 @@ debug:
   prefill: 1
   batch_size: 10
   batch_length: 20
+  # imag_horizon: 8

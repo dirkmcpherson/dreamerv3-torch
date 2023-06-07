@@ -369,7 +369,7 @@ class ImagBehavior(nn.Module):
         if repeats:
             raise NotImplemented("repeats is not implemented in this version")
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
-        start = {k: flatten(v) for k, v in start.items()}
+        startf = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev
@@ -380,12 +380,13 @@ class ImagBehavior(nn.Module):
             return succ, feat, action
 
         succ, feats, actions = tools.static_scan(
-            step, [torch.arange(horizon)], (start, None, None)
+            step, [torch.arange(horizon)], (startf, None, None)
         )
-        states = {k: torch.cat([start[k][None], v[:-1]], 0) for k, v in succ.items()}
+        states = {k: torch.cat([startf[k][None], v[:-1]], 0) for k, v in succ.items()}
         if repeats:
             raise NotImplemented("repeats is not implemented in this version")
 
+        # print(f"models::imagine: {horizon} steps."); ipshell()
         return feats, states, actions
 
     def _compute_target(
@@ -404,12 +405,6 @@ class ImagBehavior(nn.Module):
         # value(15, 960, ch)
         # action(15, 960, ch)
         # discount(15, 960, ch)
-        print(f"dreamerv3")
-        print("\timag_feat", imag_feat.shape)
-        print("\timag_action", imag_action.shape)
-        print("\tdiscount", discount.shape)
-        print("\tvalue", value.shape)
-        print("\treward", reward.shape)
         target = tools.lambda_return(
             reward[:-1],
             value[:-1],
@@ -421,6 +416,15 @@ class ImagBehavior(nn.Module):
         weights = torch.cumprod(
             torch.cat([torch.ones_like(discount[:1]), discount[:-1]], 0), 0
         ).detach()
+        if self._config.debug:
+            print(f"dreamerv3")
+            print("\timag_feat", imag_feat.shape)
+            print("\timag_action", imag_action.shape)
+            print("\tdiscount", discount.shape)
+            print("\tvalue", value.shape)
+            print("\treward", reward.shape)
+            print("\ttarget", target.__len__())
+            print("\tweights", weights.shape)
         return target, weights, value[:-1]
 
     def _compute_actor_loss(

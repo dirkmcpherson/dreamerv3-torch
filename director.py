@@ -55,16 +55,19 @@ class Director(nn.Module):
         )
         self._dataset = dataset
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
-        self._task_behavior = models.ImagBehavior(
+        self._task_behavior = director_models.HierarchyBehavior(
             config, self._wm, config.behavior_stop_grad
         )
-        self._alt_behavior = director_models.HierarchyBehavior(
-            config, self._wm, config.behavior_stop_grad
-        )
+        # self._task_behavior = models.ImagBehavior(
+        #     config, self._wm, config.behavior_stop_grad
+        # )
+        # self._alt_behavior = director_models.HierarchyBehavior(
+        #     config, self._wm, config.behavior_stop_grad
+        # )
         if config.compile:
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)
-            self._alt_behavior = torch.compile(self._alt_behavior)
+            # self._alt_behavior = torch.compile(self._alt_behavior)
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -101,17 +104,12 @@ class Director(nn.Module):
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
 
-                    truth, model, error = self._alt_behavior.goal_pred(next(self._dataset))
-
-                    # decoded_goals = to_np(truth).reshape(-1, 3, 64, 64)
-                    # self._logger.batch_images("train_goal_truth", to_np(truth))
-                    # self._logger.batch_images("train_goal_model", to_np(model))
-                    # self._logger.batch_images("train_goal_error", to_np(error))
+                    # truth, model, error = self._alt_behavior.goal_pred(next(self._dataset))
+                    truth, model, error = self._task_behavior.goal_pred(next(self._dataset))
 
                     wtf = torch.cat([truth, model, error], dim=2) # concat along height
                     self._logger.batch_images("train_goal", to_np(wtf))
                 self._logger.write(fps=True)
-                print(f"Step {self._step}. Logged.")
 
         policy_output, state = self._policy(obs, state, training)
 
@@ -125,7 +123,7 @@ class Director(nn.Module):
             batch_size = len(obs["image"])
             latent = self._wm.dynamics.initial(len(obs["image"]))
             action = torch.zeros((batch_size, self._config.num_actions)).to(self._config.device)
-            goal_dim = self._config.dyn_stoch * self._config.dyn_discrete
+            goal_dim = self._config.dyn_stoch * self._config.dyn_discrete # NOTE: This should be deter I think and it's a coincidence this is working
             goal = torch.zeros((batch_size, goal_dim)).to(self._config.device)
         else:
             latent, action, goal = state
@@ -141,30 +139,35 @@ class Director(nn.Module):
         # is it time to select a new goal?
         if self._step % self._config.train_skill_duration:
             # NOTE: We should keep a count that starts from 0 when tasks start
-            goal = self._alt_behavior.sample_goal(feat)
+            # goal = self._alt_behavior.sample_goal(feat)
+            _, goal = self._task_behavior.sample_goal(feat)
         
         gc_feat = torch.cat([feat, goal], dim=-1)
 
         # print(f"Director::_policy"); ipshell()
         if not training:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.worker.actor(gc_feat)
             action = actor.mode()
+            # actor = self._task_behavior.actor(feat)
+            # action = actor.mode()
 
-            worker = self._alt_behavior.worker.actor(gc_feat)
-            action = worker.mode()
+            # worker = self._alt_behavior.worker.actor(gc_feat)
+            # worker_action = worker.mode()
 
         elif self._should_expl(self._step):
-            actor = self._expl_behavior.actor(feat)
+            actor = self._expl_behavior.actor(gc_feat) if hasattr(self._expl_behavior, "actor") else self._expl_behavior.worker.actor(gc_feat)
             action = actor.sample()
 
             # worker = self._expl_behavior.worker(gc_feat)
             # action = worker.sample()
         else:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.worker.actor(gc_feat)
             action = actor.sample()
+            # actor = self._task_behavior.actor(feat)
+            # action = actor.sample()
 
-            worker = self._alt_behavior.worker.actor(gc_feat)
-            action = worker.sample()
+            # worker = self._alt_behavior.worker.actor(gc_feat)
+            # worker_action = worker.sample()
 
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
@@ -191,17 +194,19 @@ class Director(nn.Module):
 
     def _train(self, data):
         metrics = {}
+        if self._config.debug:
+            for k,v in data.items():
+                print(f"{k} {v.shape if hasattr(v, 'shape') else 'no shape'}")
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
         start = post
-        ipshell()
         # start['deter'] (16, 64, 512)
         extr_reward_fn = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
         # print(f"director::_train"); ipshell()
         metrics.update(self._task_behavior._train(start, extr_reward_fn)[-1])
-        metrics.update(self._alt_behavior._train(start)[-1])
+        # metrics.update(self._alt_behavior._train(start)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
