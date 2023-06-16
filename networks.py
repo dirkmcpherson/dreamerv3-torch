@@ -221,7 +221,7 @@ class RSSM(nn.Module):
         if self._shared:
             post = self.img_step(prev_state, prev_action, embed, sample)
         else:
-            if self._temp_post:
+            if self._temp_post: #JSS True
                 x = torch.cat([prior["deter"], embed], -1)
             else:
                 x = embed

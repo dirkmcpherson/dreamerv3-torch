@@ -104,6 +104,9 @@ class Director(nn.Module):
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
 
+                    goal_vid_pred = self._task_behavior.goal_video_pred(next(self._dataset))
+                    self._logger.video("train_goal_vid_pred", to_np(goal_vid_pred))
+
                     # truth, model, error = self._alt_behavior.goal_pred(next(self._dataset))
                     truth, model, error = self._task_behavior.goal_pred(next(self._dataset))
 

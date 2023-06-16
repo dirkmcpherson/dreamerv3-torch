@@ -93,6 +93,12 @@ class Dreamer(nn.Module):
                 if self._config.video_pred_log:
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
+                    goal_vid_pred = self._task_behavior.goal_video_pred(next(self._dataset))
+                    self._logger.video("train_goal_vid_pred", to_np(goal_vid_pred))
+                    truth, model, error = self._task_behavior.goal_pred(next(self._dataset))
+                    wtf = torch.cat([truth, model, error], dim=2) # concat along height
+                    self._logger.batch_images("train_goal", to_np(wtf))
+
                 self._logger.write(fps=True)
 
         policy_output, state = self._policy(obs, state, training)

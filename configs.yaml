@@ -8,7 +8,7 @@ defaults:
   seed: 0
   steps: 1e6
   eval_every: 3e4
-  log_every: 1e4
+  log_every: 1e3
   eval_episode_num: 10
   reset_every: 0
   device: 'cuda:0'
@@ -203,6 +203,7 @@ debug:
   batch_length: 20
   eval_every: 300
   log_every: 100
+  train_ratio: 100
   ## Atari
   task: 'atari_boxing'
   steps: 4e5
@@ -215,7 +216,6 @@ debug:
   resize: opencv
   actions: needed
   actor_dist: 'onehot'
-  train_ratio: 10
   imag_gradient: 'reinforce'
   time_limit: 108000
   grayscale: True

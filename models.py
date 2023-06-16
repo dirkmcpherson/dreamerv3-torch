@@ -4,6 +4,7 @@ from torch import nn
 import numpy as np
 from PIL import ImageColor, Image, ImageDraw, ImageFont
 
+import random
 import networks
 import tools
 from IPython import embed as ipshell
@@ -288,6 +289,34 @@ class ImagBehavior(nn.Module):
             config.value_grad_clip,
             **kw,
         )
+        
+        ## JS: testing out goal-ae from within dreamer
+        # the goal autencoder converts the feature representation (h? 1024?) to a one-hot of the goal
+        self.goal_enc = networks.MLP(
+            # feat_size,
+            config.dyn_deter,
+            # z_dim,
+            config.skill_shape, # size of output
+            **config.goal_encoder
+        )
+        self.goal_dec = networks.MLP(
+            np.prod(config.skill_shape),
+            # (config.dyn_stoch, config.dyn_discrete), # size of input
+            # feat_size,
+            config.dyn_deter,
+            **config.goal_decoder
+        )
+        kw = dict(wd=config.goal_ae_wd, opt=config.opt, use_amp=self._use_amp)
+        self._goal_ae_opt = tools.Optimizer(
+            "goal_ae",
+            list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()),
+            config.goal_ae_lr,
+            config.goal_ae_opt_eps,
+            config.goal_ae_grad_clip,
+            **kw,
+        )
+        ##
+
         if self._config.reward_EMA:
             self.reward_ema = RewardEMA(device=self._config.device)
 
@@ -347,6 +376,17 @@ class ImagBehavior(nn.Module):
                 # (time, batch, 1), (time, batch, 1) -> (1,)
                 value_loss = torch.mean(weights[:-1] * value_loss[:, :, None])
 
+        with tools.RequiresGrad(self.goal_enc):
+            with tools.RequiresGrad(self.goal_dec):
+                with torch.cuda.amp.autocast(self._use_amp):
+                    feat = start["deter"]
+                    enc = self.goal_enc(feat)
+                    enc_sample = enc.sample()
+                    enc_sample = enc_sample.reshape(*enc_sample.shape[:-2], -1)
+                    dec = self.goal_dec(enc_sample)
+                    rec = -dec.log_prob(feat.detach())
+                    goal_ae_loss = torch.mean(rec)
+
         metrics.update(tools.tensorstats(value.mode(), "value"))
         metrics.update(tools.tensorstats(target, "target"))
         metrics.update(tools.tensorstats(reward, "imag_reward"))
@@ -362,6 +402,7 @@ class ImagBehavior(nn.Module):
         with tools.RequiresGrad(self):
             metrics.update(self._actor_opt(actor_loss, self.actor.parameters()))
             metrics.update(self._value_opt(value_loss, self.value.parameters()))
+            metrics.update(self._goal_ae_opt(goal_ae_loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters())))
         return imag_feat, imag_state, imag_action, weights, metrics
 
     def _imagine(self, start, policy, horizon, repeats=None):
@@ -388,6 +429,79 @@ class ImagBehavior(nn.Module):
 
         # print(f"models::imagine: {horizon} steps."); ipshell()
         return feats, states, actions
+    
+    def goal_video_pred(self, data):
+        n_frames = 16
+        data = self._world_model.preprocess(data)
+        embed = self._world_model.encoder(data)
+
+        post, _ = self._world_model.dynamics.observe(
+            embed[:6, :n_frames], data["action"][:6, :n_frames], data["is_first"][:6, :n_frames]
+        )
+        recon = self._world_model.heads["decoder"](self._world_model.dynamics.get_feat(post))["image"].mode()[:6]
+
+        deter = post["deter"]
+        goal = self.goal_enc(deter)
+        goal_sample = goal.sample()
+        goal_sample = goal_sample.reshape([*goal_sample.shape[:-2], -1]) # (batch, time, feat*feat)
+        dec_deter = self.goal_dec(goal_sample).mode()
+
+        deter_stoch = self._world_model.dynamics.get_stoch(deter)
+        deter_stoch = deter_stoch.reshape([*deter_stoch.shape[:-2], -1])
+        inp = torch.cat([deter_stoch, dec_deter], dim=-1)
+        goal_reconstruction = self._world_model.heads["decoder"](inp)["image"].mode()
+
+        truth = data["image"][:6, :n_frames] + 0.5
+        model_reconstruction = recon + 0.5
+        goal_reconstruction += + 0.5
+
+        return torch.cat([truth, model_reconstruction, goal_reconstruction], 2)
+
+    def goal_pred(self, data):
+        data = self._world_model.preprocess(data)
+        
+        reshape = lambda x: x.reshape([*x.shape[:-2], -1])
+
+        # Look at a random subset of batches 
+        random_batches = random.choices(range(data["image"].shape[0]), k=4)
+        random_samples = random.choices(range(data["image"].shape[1]), k=1)
+
+        actions = data["action"][random_batches, :]
+        is_first = data["is_first"][random_batches, :]
+        embed = self._world_model.encoder(data)[random_batches, :]
+
+        post, _ = self._world_model.dynamics.observe(embed, actions, is_first)
+
+        # feat = self._world_model.dynamics.get_feat(states)
+        feat = post["deter"]
+        enc = self.goal_enc(feat).sample()
+        enc = reshape(enc) # (time, batch, feat0*feat1)
+        dec = self.goal_dec(enc).mode()
+        deter = dec
+        
+        # now add the stochastic state to the deterministic state, which is what the world model decoder requires
+        # stoch = self._world_model.dynamics.get_stoch(deter)
+        stoch = post["stoch"]
+        stoch = reshape(stoch)
+        inp = torch.cat([stoch, deter], dim=-1)
+
+        model = self._world_model.heads["decoder"](inp)["image"].mode() + 0.5
+        truth = data["image"][random_batches, :] + 0.5
+        # error = (model - truth + 1.0) / 2.0
+
+        model = model[:, random_samples]
+        truth = truth[:, random_samples]
+        # error = error[:, random_samples]
+
+        # What's the model think it's own stoch/deter looks like?
+        inp = self._world_model.dynamics.get_feat(post)
+        # inp = torch.cat([post["stoch"], post["deter"]], dim=-1)
+        world_reconstruction = self._world_model.heads["decoder"](inp)["image"].mode() + 0.5
+        world_reconstruction = world_reconstruction[:, random_samples]
+        # return model
+        # print(f"director_models::goal_pred"); ipshell()
+        # return truth, model, error
+        return truth, model, world_reconstruction
 
     def _compute_target(
         self, imag_feat, imag_state, imag_action, reward, actor_ent, state_ent
