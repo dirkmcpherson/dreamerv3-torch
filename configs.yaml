@@ -7,9 +7,9 @@ defaults:
   offline_evaldir: ''
   seed: 0
   steps: 1e6
-  eval_every: 5e3 # 1e4
-  eval_episode_num: 10
+  eval_every: 3e4
   log_every: 1e4
+  eval_episode_num: 10
   reset_every: 0
   device: 'cuda:0'
   compile: True
@@ -25,7 +25,7 @@ defaults:
   action_repeat: 2
   time_limit: 1000
   grayscale: False
-  prefill: 2500
+  prefill: 5e3 # 2500
   eval_noise: 0.0
   reward_EMA: True
 
@@ -74,7 +74,7 @@ defaults:
   pretrain: 100
   model_lr: 1e-4
   opt_eps: 1e-8
-  grad_clip: 1000
+  grad_clip: 100
   value_lr: 3e-5
   actor_lr: 3e-5
   ac_opt_eps: 1e-5
@@ -124,27 +124,36 @@ defaults:
   manager_actent: 0.5
   manager_actor: {act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1}
   expl_reward_weight: 0.1
-  extr_reward_weight: 0.1
+  extr_reward_weight: 1.0                                                                                                                                      
   worker_actor: {act: "SiLU", norm: "LayerNorm", dist: "normal", outscale: 0.1}
 
   actor: {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1}
 
   goal_ae_layers: 4
   goal_ae_units: 512
-  goal_ae_grad_clip: 100
-  goal_ae_lr: 3e-5
+  goal_ae_grad_clip: 100.0
+  goal_ae_opt_eps: 1e-6
+  goal_ae_lr: 1e-4
+  goal_ae_wd: 1e-2
+# goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
+# goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   goal_encoder: 
     {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1} # unimix_ratio: 0.0,
   goal_decoder: 
-    {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "symlog_mse", outscale: 0.1} # dist: mse in original
+    {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "mse", outscale: 0.1} # dist: mse in original
   train_skill_duration: 8
+  kl_autoadapt: 
+    {impl: mult, scale: 0.0, target: 10.0, min: 1e-5, max: 1.0}
 
   # Director Debugs
   debug_only_goal_ae: False
   debug_always_update: False
+  debug_uiux: False
+  debug_user_steps: 100
 
   # Exploration
-  expl_behavior: 'greedy'
+  # expl_behavior: 'greedy'
+  expl_behavior: 'random'
   expl_until: 0
   expl_extr_scale: 0.0
   expl_intr_scale: 1.0
@@ -166,14 +175,15 @@ dmc_vision:
 dmc_proprio:
   steps: 5e5
   train_ratio: 512
-  video_pred_log: false
+  video_pred_log: False
   encoder: {mlp_keys: '.*', cnn_keys: '$^'}
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
 
 atari100k:
   steps: 4e5
   action_repeat: 4
-  eval_episode_num: 100
+  envs: 1
+  eval_episode_num: 20
   stickey: False
   lives: unused
   noops: 30
@@ -183,11 +193,30 @@ atari100k:
   train_ratio: 1024
   imag_gradient: 'reinforce'
   time_limit: 108000
+  grayscale: True
 
 debug:
-  debug: True
+  debug: False
   pretrain: 1
   prefill: 1
   batch_size: 10
   batch_length: 20
+  eval_every: 300
+  log_every: 100
+  ## Atari
+  task: 'atari_boxing'
+  steps: 4e5
+  action_repeat: 4
+  envs: 1
+  stickey: False
+  eval_episode_num: 2
+  lives: unused
+  noops: 30
+  resize: opencv
+  actions: needed
+  actor_dist: 'onehot'
+  train_ratio: 10
+  imag_gradient: 'reinforce'
+  time_limit: 108000
+  grayscale: True
   # imag_horizon: 8

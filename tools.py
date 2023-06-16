@@ -131,6 +131,9 @@ class Logger:
         value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
         self._writer.add_video(name, value, step, 16)
 
+    def add_graph(self, model, input_to_model=None):
+        self._writer.add_graph(model, input_to_model)
+
 
 def simulate(agent, envs, steps=0, episodes=0, state=None):
     # Initialize or unpack simulation state.
@@ -143,6 +146,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         reward = [0] * len(envs)
     else:
         step, episode, done, length, obs, agent_state, reward = state
+    start_time = time.time()
     while (steps and step < steps) or (episodes and episode < episodes):
         # Reset envs if necessary.
         if done.any():
@@ -153,7 +157,6 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
             reward = [reward[i] * (1 - done[i]) for i in range(len(envs))]
         # Step agents.
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0]}
-        from IPython import embed as ipshell
         action, agent_state = agent(obs, done, agent_state, reward)
         if isinstance(action, dict):
             action = [
@@ -169,8 +172,8 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         obs = list(obs)
         reward = list(reward)
         done = np.stack(done)
-        # if int(done.sum()) > 0:
-        #     print(f"\t\tFinished episode {episode} at step {step}")
+        if int(done.sum()) > 0:
+            print(f"\t\tFinished episode {episode} at step {step}. time {(time.time() - start_time) / 60:1.2f}m"); 
         episode += int(done.sum())
         length += 1
         step += (done * length).sum()
@@ -631,6 +634,7 @@ class Optimizer:
         self._scaler.unscale_(self._opt)
         # loss.backward(retain_graph=retain_graph)
         norm = torch.nn.utils.clip_grad_norm_(params, self._clip)
+        # print(f"{self._name} grad norm: {norm:+1.5f}")
         if self._wd:
             self._apply_weight_decay(params)
         self._scaler.step(self._opt)
@@ -817,7 +821,7 @@ def weight_init(m):
         denoms = (in_num + out_num) / 2.0
         scale = 1.0 / denoms
         std = np.sqrt(scale) / 0.87962566103423978
-        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0, b=2.0)
+        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0*std, b=2.0*std)
         if hasattr(m.bias, "data"):
             m.bias.data.fill_(0.0)
     elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
@@ -827,7 +831,7 @@ def weight_init(m):
         denoms = (in_num + out_num) / 2.0
         scale = 1.0 / denoms
         std = np.sqrt(scale) / 0.87962566103423978
-        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0, b=2.0)
+        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0*std, b=2.0*std)
         if hasattr(m.bias, "data"):
             m.bias.data.fill_(0.0)
     elif isinstance(m, nn.LayerNorm):

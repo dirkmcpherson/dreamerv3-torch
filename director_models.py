@@ -8,9 +8,12 @@ import random
 import networks
 import tools
 import models as dv3_models
+import torch_utils as tu
 
 from torchviz import make_dot
 from IPython import embed as ipshell
+
+from uiux import UIUX
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -41,27 +44,30 @@ class HierarchyBehavior(nn.Module):
             config.dyn_deter,
             **config.goal_decoder
         )
-        kw = dict(wd=config.weight_decay, opt=config.opt, use_amp=self._use_amp)
+        kw = dict(wd=config.goal_ae_wd, opt=config.opt, use_amp=self._use_amp)
         self.goal_ae_opt = tools.Optimizer(
             "goal_ae",
             list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()),
-            config.model_lr,
-            config.ac_opt_eps,
+            config.goal_ae_lr,
+            config.goal_ae_opt_eps,
             config.goal_ae_grad_clip,
             **kw,
         )
 
+        self.kl_autoadapt = tu.AutoAdapt((), **config.kl_autoadapt)
+
         z_shape = config.dyn_stoch * config.dyn_discrete if config.dyn_discrete else config.dyn_stoch
-        feat_size = config.dyn_deter + z_shape
+        feat_size = config.dyn_deter + z_shape # h_deter + z_stoch
+        goal_size = config.dyn_deter # h_goal
         '''
         Manager takes the world state {h,z} and outputs a skill (z_goal)
         '''
         self.manager = ImagActorCritic(config, world_model, input_shape=feat_size, num_actions=config.skill_shape, stop_grad_actor=stop_grad_actor, prefix="manager")
         
         '''
-        Worker takes the world state and skill {h,z,z_goal} and outputs an action
+        Worker takes the world state and skill {h and h_goal} and outputs an action. It's reward does not consider Z because it cannot control the Z: https://github.com/danijar/director/issues/7
         '''
-        self.worker = ImagActorCritic(config, world_model, input_shape=feat_size+z_shape, num_actions=config.num_actions, stop_grad_actor=stop_grad_actor, prefix="worker")
+        self.worker = ImagActorCritic(config, world_model, input_shape=feat_size+goal_size, num_actions=config.num_actions, stop_grad_actor=stop_grad_actor, prefix="worker")
 
         # NOTE: Hafner has a custom one-hot but it looks like straightthrough
         # self.skill_prior = tools.OneHotDist(logits=torch.zeros(config.dyn_stoch, config.dyn_discrete))
@@ -69,8 +75,11 @@ class HierarchyBehavior(nn.Module):
                 tools.OneHotDist(logits=torch.zeros(*config.skill_shape, device=config.device), unimix_ratio=0.0), 1
             )
     
+        self.uiux = UIUX(config, world_model, self.goal_dec, skill_prior=self.skill_prior)
+
     def goal_pred(self, data):
         data = self._world_model.preprocess(data)
+        
         reshape = lambda x: x.reshape([*x.shape[:-2], -1])
 
         # Look at a random subset of batches 
@@ -85,13 +94,14 @@ class HierarchyBehavior(nn.Module):
 
         # feat = self._world_model.dynamics.get_feat(states)
         feat = states["deter"]
-        enc = self.goal_enc(feat).mode()
+        enc = self.goal_enc(feat).sample()
         enc = reshape(enc) # (time, batch, feat0*feat1)
         dec = self.goal_dec(enc).mode()
         deter = dec
         
         # now add the stochastic state to the deterministic state, which is what the world model decoder requires
-        stoch = self._world_model.dynamics.get_stoch(deter)
+        # stoch = self._world_model.dynamics.get_stoch(deter)
+        stoch = states["stoch"]
         stoch = reshape(stoch)
         inp = torch.cat([stoch, deter], dim=-1)
 
@@ -173,39 +183,53 @@ class HierarchyBehavior(nn.Module):
     
         return traj
 
-    def train_goal_vae(self, start, metrics):
+    def train_goal_vae(self, data, metrics):
         # context feat is thes 
         # feat = context["feat"].detach()
-        feat = start["deter"].detach()
-        feat.requires_grad = True
-
-        enc = self.goal_enc(feat)
-        x = enc.sample()
-        x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
-        dec = self.goal_dec(x)
-        
-        # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
-        rec = -dec.log_prob(feat.detach())
-        kl = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-        loss = torch.mean(rec + kl)
+        feat = data["deter"].detach()
+        with tools.RequiresGrad(self):
+        # feat.requires_grad = True
+            enc = self.goal_enc(feat)
+            x = enc.sample()
+            x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
+            dec = self.goal_dec(x)
+            
+            # rec = -dec.log_prob(feat.detach())
+            rec = ((dec.mode() - feat.detach()) ** 2)
+            # ipshell()
+            if False:
+                # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
+                kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
+                # kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
+                kl, mets = self.kl_autoadapt(kl_nonorm)
+                # print(f"kl: {kl.mean():1.5f}, enc probstd: {enc.base_dist.probs.std():1.5f}, enc logstd: {enc.base_dist.logits.std():1.5f}")
+                # for i in range(10):
+                #     for j in range(20):
+                #         print(f"{enc.base_dist.probs[i, j, :].std():1.4f} {kl[i, j]:1.4f}")
+                loss = torch.mean(rec + kl)
+            else:
+                loss = torch.mean(rec)
         
         # dot = make_dot(loss, params=dict(list(self.goal_enc.named_parameters()) + list(self.goal_dec.named_parameters())), show_attrs=True, show_saved=True)
         # dot.format = "png"
         # dot.render("goal_ae_loss", directory="./graphs")
 
-        # with tools.RequiresGrad(self):
+            opt_mets = self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()))
+        
+        metrics.update(opt_mets)
+        # metrics.update(tools.tensorstats(rec_mse, "goal_ae_mse_rec"))
         metrics.update(tools.tensorstats(rec, "goal_ae_rec"))
-        metrics.update(tools.tensorstats(kl, "goal_ae_kl"))
+        # metrics.update({f"goal_ae_kl_autoadapt_{k}": v.detach().cpu() for k, v in mets.items()})
+        # metrics.update(tools.tensorstats(kl_nonorm, "goal_ae_kl_nonorm"))
+        # metrics.update(tools.tensorstats(kl, "goal_ae_kl"))
         metrics.update(tools.tensorstats(loss, "goal_ae_loss"))
-
-        self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()))
         # print(f"director_models::_train::train_goal_vae"); ipshell()
         return metrics
     
     def _train(
         self,
         start,
-        context=None,
+        context,
         action=None,
         extr_reward=None,
         imagine=None,
@@ -216,7 +240,7 @@ class HierarchyBehavior(nn.Module):
 
         # Train the goal autoencoder on world model representations
         # NOTE: These are posterior representations of the world model (s_t|s_t-1, a_t-1, x_t)
-        metrics = self.train_goal_vae(start, metrics)
+        metrics = self.train_goal_vae(context, metrics)
 
         if self._config.debug_only_goal_ae:
             return [metrics]
@@ -302,39 +326,39 @@ class HierarchyBehavior(nn.Module):
 
         return None, metrics
     
-    def _imagine(self, start_wm, policy, horizon, repeats=None):
-        dynamics = self._world_model.dynamics
-        if repeats:
-            raise NotImplemented("repeats is not implemented in this version")
-        flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
-        start = {k: flatten(v) for k, v in start_wm.items()}
+    # def _imagine(self, start_wm, policy, horizon, repeats=None):
+        # dynamics = self._world_model.dynamics
+        # if repeats:
+        #     raise NotImplemented("repeats is not implemented in this version")
+        # flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
+        # start = {k: flatten(v) for k, v in start_wm.items()}
 
-        def step(prev, step):
-            state, _, _, goal = prev
-            feat = dynamics.get_feat(state) # z_state + h
-            inp = feat.detach() if self._stop_grad_actor else feat
+        # def step(prev, step):
+        #     state, _, _, goal = prev
+        #     feat = dynamics.get_feat(state) # z_state + h
+        #     inp = feat.detach() if self._stop_grad_actor else feat
 
-            # NOTE: step is ignored in original code. does it mess with the flatten?
-            if goal is None or step % self._config.train_skill_duration == 0:
-                goal = self.manager(inp).sample()
+        #     # NOTE: step is ignored in original code. does it mess with the flatten?
+        #     if goal is None or step % self._config.train_skill_duration == 0:
+        #         goal = self.manager(inp).sample()
 
-            inp = torch.cat([inp, goal], -1)
+        #     inp = torch.cat([inp, goal], -1)
 
-            action = policy(inp).sample()
+        #     action = policy(inp).sample()
 
-            # print(f"director_models::_imagine::step"); ipshell()
-            succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
-            return succ, feat, action, goal
+        #     # print(f"director_models::_imagine::step"); ipshell()
+        #     succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
+        #     return succ, feat, action, goal
 
-        succ, feats, actions, goals = tools.static_scan(
-            step, [torch.arange(horizon)], (start, None, None, None)
-        )
-        states = {k: torch.cat([start[k].unsqueeze(0), v[:-1]], 0) for k, v in succ.items()}
-        if repeats:
-            raise NotImplemented("repeats is not implemented in this version")
+        # succ, feats, actions, goals = tools.static_scan(
+        #     step, [torch.arange(horizon)], (start, None, None, None)
+        # )
+        # states = {k: torch.cat([start[k].unsqueeze(0), v[:-1]], 0) for k, v in succ.items()}
+        # if repeats:
+        #     raise NotImplemented("repeats is not implemented in this version")
 
-        # print(f"director_models::_imagine"); ipshell()
-        return feats, states, actions, goals
+        # # print(f"director_models::_imagine"); ipshell()
+        # return feats, states, actions, goals
 
     def _imagine_carry(self, start_wm, policy, horizon, repeats=None):
         dynamics = self._world_model.dynamics
@@ -343,11 +367,13 @@ class HierarchyBehavior(nn.Module):
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start_wm.items()}
 
-        feat = dynamics.get_feat(start)
-        inp = feat.detach() if self._stop_grad_actor else feat
+        feat = dynamics.get_feat(start) # start["deter"]
         skill, goal = self.sample_goal(feat)
 
-        inp = torch.cat([inp, goal], -1)
+        h = start["deter"].detach() if self._stop_grad_actor else start["deter"]
+        z_stoch = start["stoch"].detach() if self._stop_grad_actor else start["stoch"]
+        z_stoch = z_stoch.reshape([*z_stoch.shape[:-2], -1])
+        inp = torch.cat([z_stoch, h, goal], -1)
         action = policy(inp).sample()
 
         actions = [action]
@@ -365,7 +391,10 @@ class HierarchyBehavior(nn.Module):
             if goal is None or step % self._config.train_skill_duration == 0:
                 skill, goal = self.sample_goal(feat)
 
-            inp = torch.cat([inp, goal], -1)
+            h = state["deter"].detach() if self._stop_grad_actor else state["deter"]
+            z_stoch = state["stoch"].detach() if self._stop_grad_actor else state["stoch"]
+            z_stoch = z_stoch.reshape([*z_stoch.shape[:-2], -1])
+            inp = torch.cat([z_stoch, h, goal], -1)
 
             action = policy(inp).sample()
 
@@ -394,7 +423,12 @@ class HierarchyBehavior(nn.Module):
         return feats, states, actions, skills, goals
     
     def sample_goal(self, feat):
-        skill = self.manager.actor(feat).sample().reshape(-1, np.product(self._config.skill_shape))
+        if self._config.debug_uiux:
+            # sample, cluster, accept ui
+            skill = self.uiux.interface(feat) # NOTE: Blocking call
+        else:
+            skill = self.manager.actor(feat).sample()
+        skill = skill.reshape(-1, np.product(self._config.skill_shape))
         goal = self.goal_dec(skill).mode()
         return skill, goal
 
@@ -553,7 +587,12 @@ class ImagActorCritic(nn.Module):
                     base,
                 )
                 metrics.update(mets)
-                value_input = imag_feat if self._prefix == "manager" else torch.cat([imag_feat, imag_goal], dim=-1)
+                if self._prefix == "manager":
+                    value_input = imag_feat  
+                elif self._prefix == "worker":
+                    value_input = torch.cat([imag_feat, imag_goal], dim=-1)
+                else:
+                    raise NotImplementedError
 
         with tools.RequiresGrad(self.value):
             with torch.cuda.amp.autocast(self._use_amp):

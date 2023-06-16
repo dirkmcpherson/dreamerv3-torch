@@ -214,7 +214,7 @@ class WorldModel(nn.Module):
 
         # print(f"models::video_pred"); ipshell()
         return torch.cat([truth, model, error], 2)
-
+    
 
 class ImagBehavior(nn.Module):
     def __init__(self, config, world_model, stop_grad_actor=True, reward=None):

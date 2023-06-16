@@ -5,7 +5,6 @@ import os
 import pathlib
 import sys
 import warnings
-from uiux import show_data
 
 os.environ["MUJOCO_GL"] = "egl"
 
@@ -71,7 +70,7 @@ class Director(nn.Module):
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
-            random=lambda: expl.Random(config),
+            random=lambda: expl.Random(config, act_space),
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
@@ -100,6 +99,7 @@ class Director(nn.Module):
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
+
                 if self._config.video_pred_log:
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
@@ -109,6 +109,9 @@ class Director(nn.Module):
 
                     wtf = torch.cat([truth, model, error], dim=2) # concat along height
                     self._logger.batch_images("train_goal", to_np(wtf))
+
+                # self._logger.add_graph(self._task_behavior.goal_enc, torch.zeros((1, 3, 1024)).to(self._config.device))
+                # self._logger.add_graph(self._task_behavior.goal_dec, torch.zeros((1, 3, 64)).to(self._config.device))
                 self._logger.write(fps=True)
 
         policy_output, state = self._policy(obs, state, training)
@@ -197,24 +200,30 @@ class Director(nn.Module):
         if self._config.debug:
             for k,v in data.items():
                 print(f"{k} {v.shape if hasattr(v, 'shape') else 'no shape'}")
-        post, context, mets = self._wm._train(data)
+        post, wm_out, mets = self._wm._train(data)
         metrics.update(mets)
+        context = {**data, **post, **wm_out}
         start = post
         # start['deter'] (16, 64, 512)
-        extr_reward_fn = lambda f, s, a: self._wm.heads["reward"](
-            self._wm.dynamics.get_feat(s)
-        ).mode()
         # print(f"director::_train"); ipshell()
-        metrics.update(self._task_behavior._train(start, extr_reward_fn)[-1])
+        metrics.update(self._task_behavior._train(start, context)[-1])
         # metrics.update(self._alt_behavior._train(start)[-1])
         if self._config.expl_behavior != "greedy":
-            mets = self._expl_behavior.train(start, context, data)[-1]
+            mets = self._expl_behavior.train(start, wm_out, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
         for name, value in metrics.items():
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]
             else:
                 self._metrics[name].append(value)
+
+    def viz_goal(self, goal, stoch=None):
+        if stoch == None:
+            stoch = self._wm.dynamics.get_stoch(goal)        
+        stoch = stoch.reshape([*stoch.shape[:-2], -1])
+        inp = torch.cat([stoch, goal], dim=-1)
+        goal_img = self._world_model.heads["decoder"](inp)["image"].mode() + 0.5
+        return goal_img
 
 
 def count_steps(folder):
@@ -408,19 +417,24 @@ def main(config):
         agent._should_pretrain._once = False
 
     state = None
-    while agent._step < config.steps:
-        logger.write()
-        print("Start evaluation.")
-        eval_policy = functools.partial(agent, training=False)
-        tools.simulate(eval_policy, eval_envs, episodes=config.eval_episode_num)
-        print(f"\tFinished {config.eval_episode_num} episodes.")
-        if config.video_pred_log:
-            video_pred = agent._wm.video_pred(next(eval_dataset))
-            logger.video("eval_openl", to_np(video_pred))
-            print(f"\tFinished eval video prediction.")
-        print("Start training.")
-        state = tools.simulate(agent, train_envs, config.eval_every, state=state)
-        torch.save(agent.state_dict(), logdir / "latest_model.pt")
+    if config.debug_uiux:
+        user_steps = 0
+        while user_steps < config.debug_user_steps:
+            logger.write()
+    else:
+        while agent._step < config.steps:
+            logger.write()
+            print("Start evaluation.")
+            eval_policy = functools.partial(agent, training=False)
+            tools.simulate(eval_policy, eval_envs, episodes=config.eval_episode_num)
+            print(f"\tFinished {config.eval_episode_num} episodes.")
+            if config.video_pred_log:
+                video_pred = agent._wm.video_pred(next(eval_dataset))
+                logger.video("eval_openl", to_np(video_pred))
+                print(f"\tFinished eval video prediction.")
+            print("Start training.")
+            state = tools.simulate(agent, train_envs, config.eval_every, state=state)
+            torch.save(agent.state_dict(), logdir / "latest_model.pt")
     for env in train_envs + eval_envs:
         try:
             env.close()

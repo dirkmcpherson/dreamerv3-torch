@@ -324,7 +324,7 @@ def main(config):
 
     if not config.offline_traindir:
         prefill = max(0, config.prefill - count_steps(config.traindir))
-        print(f"Prefill dataset ({prefill} steps).")
+        print(f"Prefill dataset ({prefill} steps). Env actions: {config.num_actions}.")
         if hasattr(acts, "discrete"):
             random_actor = tools.OneHotDist(
                 torch.zeros(config.num_actions).repeat(config.envs, 1)
