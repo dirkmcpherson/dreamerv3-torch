@@ -127,7 +127,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
     # Initialize or unpack simulation state.
     if state is None:
         step, episode = 0, 0
-        done = np.ones(len(envs), np.bool)
+        done = np.ones(len(envs), bool)
         length = np.zeros(len(envs), np.int32)
         obs = [None] * len(envs)
         agent_state = None
@@ -804,7 +804,9 @@ def weight_init(m):
         denoms = (in_num + out_num) / 2.0
         scale = 1.0 / denoms
         std = np.sqrt(scale) / 0.87962566103423978
-        nn.init.trunc_normal_(m.weight.data, mean=0.0, std=std, a=-2.0, b=2.0)
+        nn.init.trunc_normal_(
+            m.weight.data, mean=0.0, std=std, a=-2.0 * std, b=2.0 * std
+        )
         if hasattr(m.bias, "data"):
             m.bias.data.fill_(0.0)
     elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):

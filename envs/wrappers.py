@@ -77,8 +77,8 @@ class CollectDataset:
             dtype = {16: np.int16, 32: np.int32, 64: np.int64}[self._precision]
         elif np.issubdtype(value.dtype, np.uint8):
             dtype = np.uint8
-        elif np.issubdtype(value.dtype, np.bool):
-            dtype = np.bool
+        elif np.issubdtype(value.dtype, bool):
+            dtype = bool
         else:
             raise NotImplementedError(value.dtype)
         return value.astype(dtype)
@@ -179,18 +179,22 @@ class RewardObs:
     @property
     def observation_space(self):
         spaces = self._env.observation_space.spaces
-        assert "reward" not in spaces
-        spaces["reward"] = gym.spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32)
+        if "reward" not in spaces:
+            spaces["reward"] = gym.spaces.Box(
+                -np.inf, np.inf, shape=(1,), dtype=np.float32
+            )
         return gym.spaces.Dict(spaces)
 
     def step(self, action):
         obs, reward, done, info = self._env.step(action)
-        obs["reward"] = reward
+        if "reward" not in obs:
+            obs["reward"] = reward
         return obs, reward, done, info
 
     def reset(self):
         obs = self._env.reset()
-        obs["reward"] = 0.0
+        if "reward" not in obs:
+            obs["reward"] = 0.0
         return obs
 
 
