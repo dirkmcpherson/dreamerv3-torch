@@ -57,12 +57,6 @@ class Director(nn.Module):
         self._task_behavior = director_models.HierarchyBehavior(
             config, self._wm, config.behavior_stop_grad
         )
-        # self._task_behavior = models.ImagBehavior(
-        #     config, self._wm, config.behavior_stop_grad
-        # )
-        # self._alt_behavior = director_models.HierarchyBehavior(
-        #     config, self._wm, config.behavior_stop_grad
-        # )
         if config.compile:
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)

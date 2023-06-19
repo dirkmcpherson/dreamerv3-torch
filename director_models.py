@@ -29,12 +29,13 @@ class HierarchyBehavior(nn.Module):
 
         # NOTE: The RSSM has MLPs that support a nxn goal space. Use that to figure out why this isn't working. 
 
+        #### GOAL AE START
         # the goal autencoder converts the feature representation (h? 1024?) to a one-hot of the goal
         self.goal_enc = networks.MLP(
             # feat_size,
             config.dyn_deter,
             # z_dim,
-            config.skill_shape, # size of output
+            config.skill_shape, # size of output [8x8]
             **config.goal_encoder
         )
         self.goal_dec = networks.MLP(
@@ -53,6 +54,7 @@ class HierarchyBehavior(nn.Module):
             config.goal_ae_grad_clip,
             **kw,
         )
+        #### GOAL AE END
 
         self.kl_autoadapt = tu.AutoAdapt((), **config.kl_autoadapt)
 
@@ -190,11 +192,11 @@ class HierarchyBehavior(nn.Module):
         with tools.RequiresGrad(self):
         # feat.requires_grad = True
             enc = self.goal_enc(feat)
-            x = enc.sample()
+            x = enc.sample() # discrete one-hot grid
             x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
             dec = self.goal_dec(x)
             
-            # rec = -dec.log_prob(feat.detach())
+            # rec = -dec.log_prob(feat.detach()) # DHafner's original
             rec = ((dec.mode() - feat.detach()) ** 2)
             # ipshell()
             if False:

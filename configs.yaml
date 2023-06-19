@@ -192,19 +192,25 @@ crafter:
   video_pred_log: true
   dyn_hidden: 1024
   dyn_deter: 4096
+  # dyn_deter: 2048
   units: 1024
-  reward_layers: 5
-  cont_layers: 5
-  value_layers: 5
-  actor_layers: 5
-  encoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 96, mlp_layers: 5, mlp_units: 1024}
-  decoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 96, mlp_layers: 5, mlp_units: 1024}
+  # reward_layers: 5
+  # cont_layers: 5
+  # value_layers: 5
+  # actor_layers: 5
+  reward_layers: 3
+  cont_layers: 3
+  value_layers: 3
+  actor_layers: 3
+  # encoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 96, mlp_layers: 5, mlp_units: 1024}
+  encoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 64, mlp_layers: 5, mlp_units: 512}
+  # decoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 96, mlp_layers: 5, mlp_units: 1024}
+  decoder: {mlp_keys: '$^', cnn_keys: 'image', cnn_depth: 64, mlp_layers: 5, mlp_units: 512}
   actor_dist: 'onehot'
   imag_gradient: 'reinforce'
 
 atari100k:
   steps: 4e5
-  envs: 1
   action_repeat: 4
   envs: 1
   eval_episode_num: 20
