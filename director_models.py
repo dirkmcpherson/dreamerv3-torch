@@ -79,6 +79,33 @@ class HierarchyBehavior(nn.Module):
     
         self.uiux = UIUX(config, world_model, self.goal_dec, skill_prior=self.skill_prior)
 
+    def goal_video_pred(self, data):
+        n_frames = 32
+        data = self._world_model.preprocess(data)
+        embed = self._world_model.encoder(data)
+
+        post, _ = self._world_model.dynamics.observe(
+            embed[:6, :n_frames], data["action"][:6, :n_frames], data["is_first"][:6, :n_frames]
+        )
+        recon = self._world_model.heads["decoder"](self._world_model.dynamics.get_feat(post))["image"].mode()[:6]
+
+        deter = post["deter"]
+        goal = self.goal_enc(deter)
+        goal_sample = goal.sample()
+        goal_sample = goal_sample.reshape([*goal_sample.shape[:-2], -1]) # (batch, time, feat*feat)
+        dec_deter = self.goal_dec(goal_sample).mode()
+
+        deter_stoch = self._world_model.dynamics.get_stoch(deter)
+        deter_stoch = deter_stoch.reshape([*deter_stoch.shape[:-2], -1])
+        inp = torch.cat([deter_stoch, dec_deter], dim=-1)
+        goal_reconstruction = self._world_model.heads["decoder"](inp)["image"].mode()
+
+        truth = data["image"][:6, :n_frames] + 0.5
+        model_reconstruction = recon + 0.5
+        goal_reconstruction += + 0.5
+
+        return torch.cat([truth, model_reconstruction, goal_reconstruction], 2)
+
     def goal_pred(self, data):
         data = self._world_model.preprocess(data)
         
@@ -189,43 +216,26 @@ class HierarchyBehavior(nn.Module):
         # context feat is thes 
         # feat = context["feat"].detach()
         feat = data["deter"].detach()
-        with tools.RequiresGrad(self):
-        # feat.requires_grad = True
-            enc = self.goal_enc(feat)
-            x = enc.sample() # discrete one-hot grid
-            x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
-            dec = self.goal_dec(x)
-            
-            # rec = -dec.log_prob(feat.detach()) # DHafner's original
-            rec = ((dec.mode() - feat.detach()) ** 2)
-            # ipshell()
-            if False:
-                # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
-                kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-                # kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-                kl, mets = self.kl_autoadapt(kl_nonorm)
-                # print(f"kl: {kl.mean():1.5f}, enc probstd: {enc.base_dist.probs.std():1.5f}, enc logstd: {enc.base_dist.logits.std():1.5f}")
-                # for i in range(10):
-                #     for j in range(20):
-                #         print(f"{enc.base_dist.probs[i, j, :].std():1.4f} {kl[i, j]:1.4f}")
-                loss = torch.mean(rec + kl)
-            else:
-                loss = torch.mean(rec)
+        with tools.RequiresGrad(self.goal_enc):
+            with tools.RequiresGrad(self.goal_dec):
+                enc = self.goal_enc(feat)
+                x = enc.sample() # discrete one-hot grid
+                x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
+                dec = self.goal_dec(x)
+                rec = -dec.log_prob(feat.detach()) # DHafner's original
+                if self._config.goal_vae_kl:
+                    # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
+                    kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
+                    kl, _ = self.kl_autoadapt(kl_nonorm)
+                    loss = torch.mean(rec + kl)
+                else:
+                    loss = torch.mean(rec)
         
-        # dot = make_dot(loss, params=dict(list(self.goal_enc.named_parameters()) + list(self.goal_dec.named_parameters())), show_attrs=True, show_saved=True)
-        # dot.format = "png"
-        # dot.render("goal_ae_loss", directory="./graphs")
+                metrics.update(self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters())))
+        
+        metrics.update(tools.tensorstats(rec.detach().cpu(), "goal_ae_rec"))
+        metrics.update(tools.tensorstats(loss.detach().cpu(), "goal_ae_loss"))
 
-            opt_mets = self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()))
-        
-        metrics.update(opt_mets)
-        # metrics.update(tools.tensorstats(rec_mse, "goal_ae_mse_rec"))
-        metrics.update(tools.tensorstats(rec, "goal_ae_rec"))
-        # metrics.update({f"goal_ae_kl_autoadapt_{k}": v.detach().cpu() for k, v in mets.items()})
-        # metrics.update(tools.tensorstats(kl_nonorm, "goal_ae_kl_nonorm"))
-        # metrics.update(tools.tensorstats(kl, "goal_ae_kl"))
-        metrics.update(tools.tensorstats(loss, "goal_ae_loss"))
-        # print(f"director_models::_train::train_goal_vae"); ipshell()
         return metrics
     
     def _train(
@@ -242,6 +252,7 @@ class HierarchyBehavior(nn.Module):
 
         # Train the goal autoencoder on world model representations
         # NOTE: These are posterior representations of the world model (s_t|s_t-1, a_t-1, x_t)
+                
         metrics = self.train_goal_vae(context, metrics)
 
         if self._config.debug_only_goal_ae:
@@ -321,8 +332,7 @@ class HierarchyBehavior(nn.Module):
                     old = traj[key]
                 print(f"\t{key} shape:  {old.shape} --> {value.shape}")
 
-
-
+          
         metrics.update(self.manager._train(imag_traj=mtraj)[-1])
         metrics.update(self.worker._train(imag_traj=wtraj)[-1])
 

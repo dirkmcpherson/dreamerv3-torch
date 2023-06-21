@@ -384,8 +384,10 @@ class ImagBehavior(nn.Module):
                     enc_sample = enc.sample()
                     enc_sample = enc_sample.reshape(*enc_sample.shape[:-2], -1)
                     dec = self.goal_dec(enc_sample)
-                    rec = -dec.log_prob(feat.detach())
+                    # rec = -dec.log_prob(feat.detach())
+                    rec = (dec.mode() - feat.detach()).pow(2)
                     goal_ae_loss = torch.mean(rec)
+                    # ipshell()
 
         metrics.update(tools.tensorstats(value.mode(), "value"))
         metrics.update(tools.tensorstats(target, "target"))
@@ -431,7 +433,7 @@ class ImagBehavior(nn.Module):
         return feats, states, actions
     
     def goal_video_pred(self, data):
-        n_frames = 16
+        n_frames = 32
         data = self._world_model.preprocess(data)
         embed = self._world_model.encoder(data)
 

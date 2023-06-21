@@ -68,7 +68,8 @@ class Director(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
-    def __call__(self, obs, reset, state=None, reward=None, training=True):
+    def __call__(self, obs, reset, state=None, reward=None, training=True, human=False):
+        assert not (human and training) # can't be both for now
         step = self._step
         if self._should_reset(step):
             state = None
@@ -110,6 +111,9 @@ class Director(nn.Module):
                 # self._logger.add_graph(self._task_behavior.goal_enc, torch.zeros((1, 3, 1024)).to(self._config.device))
                 # self._logger.add_graph(self._task_behavior.goal_dec, torch.zeros((1, 3, 64)).to(self._config.device))
                 self._logger.write(fps=True)
+        elif human:
+            print(f"Director::_train::human <<<<<<<<<<<<<"); ipshell()
+            pass
 
         policy_output, state = self._policy(obs, state, training)
 
@@ -201,9 +205,9 @@ class Director(nn.Module):
         metrics.update(mets)
         context = {**data, **post, **wm_out}
         start = post
-        # start['deter'] (16, 64, 512)
-        # print(f"director::_train"); ipshell()
+
         metrics.update(self._task_behavior._train(start, context)[-1])
+
         # metrics.update(self._alt_behavior._train(start)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, wm_out, data)[-1]
@@ -232,55 +236,7 @@ def make_dataset(episodes, config):
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
 
-
-def make_env(config, logger, mode, train_eps, eval_eps):
-    suite, task = config.task.split("_", 1)
-    if suite == "dmc":
-        import envs.dmc as dmc
-
-        env = dmc.DeepMindControl(task, config.action_repeat, config.size)
-        env = wrappers.NormalizeActions(env)
-    elif suite == "atari":
-        import envs.atari as atari
-
-        env = atari.Atari(
-            task,
-            config.action_repeat,
-            config.size,
-            gray=config.grayscale,
-            noops=config.noops,
-            lives=config.lives,
-            sticky=config.stickey,
-            actions=config.actions,
-            resize=config.resize,
-        )
-        env = wrappers.OneHotAction(env)
-    elif suite == "dmlab":
-        import envs.dmlab as dmlab
-
-        env = dmlab.DeepMindLabyrinth(
-            task, mode if "train" in mode else "test", config.action_repeat
-        )
-        env = wrappers.OneHotAction(env)
-    else:
-        raise NotImplementedError(suite)
-    env = wrappers.TimeLimit(env, config.time_limit)
-    env = wrappers.SelectAction(env, key="action")
-    if (mode == "train") or (mode == "eval"):
-        callbacks = [
-            functools.partial(
-                ProcessEpisodeWrap.process_episode,
-                config,
-                logger,
-                mode,
-                train_eps,
-                eval_eps,
-            )
-        ]
-        env = wrappers.CollectDataset(env, mode, train_eps, callbacks=callbacks)
-    env = wrappers.RewardObs(env)
-    return env
-
+from dreamer import make_env
 
 class ProcessEpisodeWrap:
     eval_scores = []
@@ -431,6 +387,8 @@ def main(config):
                 print(f"\tFinished eval video prediction.")
             print("Start training.")
             state = tools.simulate(agent, train_envs, config.eval_every, state=state)
+            human_policy = functools.partial(agent, training=False, human=True)
+            state = tools.simulate(human_policy, train_envs, config.eval_every, state=state)
             torch.save(agent.state_dict(), logdir / "latest_model.pt")
     for env in train_envs + eval_envs:
         try:
@@ -462,4 +420,5 @@ if __name__ == "__main__":
     for key, value in sorted(defaults.items(), key=lambda x: x[0]):
         arg_type = tools.args_type(value)
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
-    main(parser.parse_args(remaining))
+    config = parser.parse_args(remaining)
+    main(config)

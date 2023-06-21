@@ -17,6 +17,7 @@ defaults:
   debug: False
   expl_gifs: False
   video_pred_log: True
+  visualize_graphs: False
 
   # Environment
   task: 'dmc_walker_walk'
@@ -32,7 +33,9 @@ defaults:
   # Model
   dyn_cell: 'gru_layer_norm'
   dyn_hidden: 1024
+  # dyn_hidden: 2048
   dyn_deter: 1024
+  # dyn_deter: 2048
   dyn_stoch: 32
   dyn_discrete: 32
   dyn_input_layers: 1
@@ -52,9 +55,9 @@ defaults:
   act: 'SiLU'
   norm: 'LayerNorm'
   encoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, symlog_inputs: True}
+    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 16, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, symlog_inputs: True}
   decoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse}
+    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 16, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse}
   value_head: 'symlog_disc'
   reward_head: 'symlog_disc'
   dyn_scale: '0.5'
@@ -133,8 +136,9 @@ defaults:
   goal_ae_units: 512
   goal_ae_grad_clip: 100.0
   goal_ae_opt_eps: 1e-6
-  goal_ae_lr: 1e-4
+  goal_ae_lr: 1e-5 # 1e-4
   goal_ae_wd: 1e-2
+  goal_vae_kl: True
 # goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
 # goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   goal_encoder: 
