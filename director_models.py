@@ -434,8 +434,8 @@ class HierarchyBehavior(nn.Module):
         # print(f"director_models::_imagine"); ipshell()
         return feats, states, actions, skills, goals
     
-    def sample_goal(self, feat):
-        if self._config.debug_uiux:
+    def sample_goal(self, feat, human=False):
+        if human or self._config.debug_uiux:
             # sample, cluster, accept ui
             skill = self.uiux.interface(feat) # NOTE: Blocking call
         else:

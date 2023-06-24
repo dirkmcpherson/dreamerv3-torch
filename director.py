@@ -24,6 +24,7 @@ from torch import nn
 from torch import distributions as torchd
 
 from IPython import embed as ipshell
+from uiux import UIUX, CirclePattern
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -111,18 +112,20 @@ class Director(nn.Module):
                 # self._logger.add_graph(self._task_behavior.goal_enc, torch.zeros((1, 3, 1024)).to(self._config.device))
                 # self._logger.add_graph(self._task_behavior.goal_dec, torch.zeros((1, 3, 64)).to(self._config.device))
                 self._logger.write(fps=True)
-        elif human:
-            print(f"Director::_train::human <<<<<<<<<<<<<"); ipshell()
-            pass
 
-        policy_output, state = self._policy(obs, state, training)
+        policy_output, state = self._policy(obs, state, training, human)
 
         if training:
             self._step += len(reset)
             self._logger.step = self._config.action_repeat * self._step
+
+        if human:
+            # gotta do something to mark the trajectories the human is creating.
+            pass
+
         return policy_output, state
 
-    def _policy(self, obs, state, training):
+    def _policy(self, obs, state, training, human=False):
         if state is None:
             batch_size = len(obs["image"])
             latent = self._wm.dynamics.initial(len(obs["image"]))
@@ -142,13 +145,16 @@ class Director(nn.Module):
         
         # is it time to select a new goal?
         if self._step % self._config.train_skill_duration:
+            print(f"Selecting a new goal because step {self._step} % {self._config.train_skill_duration} == 0")
             # NOTE: We should keep a count that starts from 0 when tasks start
-            # goal = self._alt_behavior.sample_goal(feat)
-            _, goal = self._task_behavior.sample_goal(feat)
+            _, goal = self._task_behavior.sample_goal(feat, human=human)
+        else:
+            print(f"Didn't select a new goal because step {self._step} % {self._config.train_skill_duration} != 0")
         
         gc_feat = torch.cat([feat, goal], dim=-1)
 
         # print(f"Director::_policy"); ipshell()
+
         if not training:
             actor = self._task_behavior.worker.actor(gc_feat)
             action = actor.mode()
@@ -176,25 +182,9 @@ class Director(nn.Module):
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
-        if self._config.actor_dist == "onehot_gumble":
-            action = torch.one_hot(
-                torch.argmax(action, dim=-1), self._config.num_actions
-            )
-        action = self._exploration(action, training)
         policy_output = {"action": action, "logprob": logprob}
         state = (latent, action, goal)
         return policy_output, state
-
-    def _exploration(self, action, training):
-        amount = self._config.expl_amount if training else self._config.eval_noise
-        if amount == 0:
-            return action
-        if "onehot" in self._config.actor_dist:
-            probs = amount / self._config.num_actions + (1 - amount) * action
-            return tools.OneHotDist(probs=probs).sample()
-        else:
-            return torch.clip(torchd.normal.Normal(action, amount).sample(), -1, 1)
-        raise NotImplementedError(self._config.action_noise)
 
     def _train(self, data):
         metrics = {}
@@ -357,6 +347,12 @@ def main(config):
     print("Simulate agent.")
     train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
+
+    # NOTE: JS, bad code
+    if config.show_trained_policy:
+        print(f"Forcing CPU device to show trained policy.")
+        config.device = "cpu"
+
     agent = Director(
         train_envs[0].observation_space,
         train_envs[0].action_space,
@@ -368,6 +364,63 @@ def main(config):
     if (logdir / "latest_model.pt").exists():
         agent.load_state_dict(torch.load(logdir / "latest_model.pt"))
         agent._should_pretrain._once = False
+
+        #### JS: load the pre-trained policy and mess with it
+        if config.show_trained_policy:
+            import time
+            import cv2
+            print(f"Displaying the trained policy and then exiting..")
+            # classic RL loop
+            env = eval_envs[0]
+            obs = env.reset()
+            state = None
+            obs["reward"] = torch.Tensor([obs["reward"]])
+            obs["is_first"] = torch.Tensor([obs["is_first"]])
+            obs["is_last"] = torch.Tensor([obs["is_last"]])
+            obs["is_terminal"] = torch.Tensor([obs["is_terminal"]])
+
+            # wrap everything in tensors
+            # for k, v in obs.items():
+            #     obs[k] = torch.tensor(v, dtype=torch.float32).unsqueeze(0)
+            for ep in range(10):
+                done = np.array([False])
+                while not any(done):
+                    # for k, v in obs.items():
+                    #     obs[k] = torch.tensor(v, dtype=torch.float32)
+                    obs["is_terminal"] = torch.Tensor(obs["is_terminal"])
+                    obs["image"] = torch.Tensor(obs["image"]).unsqueeze(0)
+                    action, state = agent(obs, done, state, training=False, human=False)
+                    action["action"] = to_np(action["action"])[0]
+                    obs, reward, done, info = env.step(action)
+                    # print("obs", obs)
+                    # display the image
+                    if False: # or hasattr(env, "render"):
+                        env.render()
+                    else:
+                        print(f"Episode {ep} reward: {reward}, done: {done}")
+                        # display with opencv
+                        # blow up the image
+                        latent, action, goal = state
+                        stoch = agent._wm.dynamics.get_stoch(goal)
+                        stoch = stoch.reshape(1, -1)
+                        inp = torch.cat([stoch, goal], axis=-1)
+
+                        goal_img = agent._wm.heads["decoder"](inp.unsqueeze(0))["image"].mode()
+                        goal_img = to_np(goal_img.squeeze(0).squeeze(0))
+
+                        img = np.concatenate([obs["image"], goal_img], axis=0)
+                        # ipshell()
+                        # img = cv2.resize(img, (1024, 512))
+                        scaled_img = cv2.resize(obs["image"], (512, 512))
+                        cv2.imshow("image", scaled_img)
+                        cv2.imshow("alt", img)
+                        cv2.imshow("goal", goal_img)
+                        cv2.waitKey(1)
+                    time.sleep(0.01)
+                    done = np.array([done])
+            exit()
+        #############################
+
 
     state = None
     if config.debug_uiux:
@@ -386,9 +439,12 @@ def main(config):
                 logger.video("eval_openl", to_np(video_pred))
                 print(f"\tFinished eval video prediction.")
             print("Start training.")
-            state = tools.simulate(agent, train_envs, config.eval_every, state=state)
-            human_policy = functools.partial(agent, training=False, human=True)
-            state = tools.simulate(human_policy, train_envs, config.eval_every, state=state)
+            state = tools.simulate(agent, train_envs, steps=config.eval_every, state=state)
+
+            if config.human_policy:
+                print("Start human policy.")
+                human_policy = functools.partial(agent, training=False, human=True)
+                state = tools.simulate(human_policy, train_envs, config.eval_every, state=state)
             torch.save(agent.state_dict(), logdir / "latest_model.pt")
     for env in train_envs + eval_envs:
         try:

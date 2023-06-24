@@ -18,6 +18,8 @@ defaults:
   expl_gifs: False
   video_pred_log: True
   visualize_graphs: False
+  human_policy: True # Let the human select goals in place of the manager
+  show_trained_policy: False # Show the trained policy and exit
 
   # Environment
   task: 'dmc_walker_walk'
@@ -55,9 +57,9 @@ defaults:
   act: 'SiLU'
   norm: 'LayerNorm'
   encoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 16, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, symlog_inputs: True}
+    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, symlog_inputs: True}
   decoder:
-    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 16, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse}
+    {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: 'LayerNorm', cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 2, mlp_units: 512, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse}
   value_head: 'symlog_disc'
   reward_head: 'symlog_disc'
   dyn_scale: '0.5'
@@ -239,22 +241,36 @@ debug:
   eval_every: 300
   log_every: 100
   train_ratio: 100
-  ## Atari
-  task: 'atari_boxing'
-  steps: 4e5
-  action_repeat: 4
-  envs: 1
-  stickey: False
   eval_episode_num: 2
-  lives: unused
-  noops: 30
-  resize: opencv
-  actions: needed
   actor_dist: 'onehot'
   imag_gradient: 'reinforce'
-  time_limit: 108000
-  grayscale: True
-  # imag_horizon: 8
+  
+  task: 'pinpad_three'
+  
+  # memory maze
+  # task: MemoryMaze_9x9
+  # action_repeate: 2
+
+  # atari
+  # steps: 4e5
+  # action_repeat: 4
+  # envs: 1
+  # stickey: False
+  # lives: unused
+  # noops: 30
+  # resize: opencv
+  # actions: needed
+  # actor_dist: 'onehot'
+  # imag_gradient: 'reinforce'
+  # time_limit: 108000
+  # grayscale: True
+
+pinpad:
+  steps: 1e6
+  actor_dist: 'onehot'
+  imag_gradient: 'reinforce'
+  task: 'pinpad_three'
+  eval_every: 1000
 
 MemoryMaze:
   steps: 1e6

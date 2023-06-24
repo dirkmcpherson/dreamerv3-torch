@@ -228,6 +228,11 @@ def make_env(config, logger, mode, train_eps, eval_eps):
         import envs.crafter as crafter
         env = crafter.Crafter(task, config.size)
         env = wrappers.OneHotAction(env)
+    elif suite == 'pinpad':
+        import envs.pinpad as pinpad
+        assert config.size == (64, 64), "PinPad only supports 64x64 images " + str(config.size)
+        env = pinpad.PinPad(task)
+        env = wrappers.OneHotAction(env)
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)
