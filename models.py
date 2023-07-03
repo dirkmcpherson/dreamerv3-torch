@@ -151,6 +151,7 @@ class WorldModel(nn.Module):
                     losses[name] = -torch.mean(like) * self._scales.get(name, 1.0)
                 model_loss = sum(losses.values()) + kl_loss
             metrics = self._model_opt(model_loss, self.parameters())
+            # metrics = self._model_opt(model_loss, self.parameters(), named_parameters=dict(self.named_parameters()) if self._config.make_dots else None)
 
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
         metrics["kl_free"] = kl_free
@@ -381,13 +382,17 @@ class ImagBehavior(nn.Module):
                 with torch.cuda.amp.autocast(self._use_amp):
                     feat = start["deter"]
                     enc = self.goal_enc(feat)
+                    pre_loss_probs = enc.base_dist.probs.detach().cpu() ## DEBUG
                     enc_sample = enc.sample()
                     enc_sample = enc_sample.reshape(*enc_sample.shape[:-2], -1)
                     dec = self.goal_dec(enc_sample)
-                    # rec = -dec.log_prob(feat.detach())
-                    rec = (dec.mode() - feat.detach()).pow(2)
+                    rec = -dec.log_prob(feat.detach())
+                    # rec = (dec.mode() - feat.detach()).pow(2)
                     goal_ae_loss = torch.mean(rec)
-                    # ipshell()
+        with torch.no_grad():
+            enc = self.goal_enc(feat)
+            post_loss_probs = enc.base_dist.probs.detach().cpu()
+            print(f"\tvae probs: {pre_loss_probs[0, 0, 0, 0:2]} {post_loss_probs[0, 0, 0, 0:2]} loss: {goal_ae_loss.detach().cpu()}")
 
         metrics.update(tools.tensorstats(value.mode(), "value"))
         metrics.update(tools.tensorstats(target, "target"))
@@ -448,7 +453,9 @@ class ImagBehavior(nn.Module):
         goal_sample = goal_sample.reshape([*goal_sample.shape[:-2], -1]) # (batch, time, feat*feat)
         dec_deter = self.goal_dec(goal_sample).mode()
 
-        deter_stoch = self._world_model.dynamics.get_stoch(deter)
+        # deter_stoch = self._world_model.dynamics.get_stoch(deter)
+
+        deter_stoch = self._world_model.dynamics.get_stoch(dec_deter)
         deter_stoch = deter_stoch.reshape([*deter_stoch.shape[:-2], -1])
         inp = torch.cat([deter_stoch, dec_deter], dim=-1)
         goal_reconstruction = self._world_model.heads["decoder"](inp)["image"].mode()

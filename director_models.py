@@ -59,7 +59,7 @@ class HierarchyBehavior(nn.Module):
         self.kl_autoadapt = tu.AutoAdapt((), **config.kl_autoadapt)
 
         z_shape = config.dyn_stoch * config.dyn_discrete if config.dyn_discrete else config.dyn_stoch
-        feat_size = config.dyn_deter + z_shape # h_deter + z_stoch
+        feat_size = z_shape + config.dyn_deter # z_stoch + h_deter
         goal_size = config.dyn_deter # h_goal
         '''
         Manager takes the world state {h,z} and outputs a skill (z_goal)
@@ -77,7 +77,7 @@ class HierarchyBehavior(nn.Module):
                 tools.OneHotDist(logits=torch.zeros(*config.skill_shape, device=config.device), unimix_ratio=0.0), 1
             )
     
-        self.uiux = UIUX(config, world_model, self.goal_dec, skill_prior=self.skill_prior)
+        self.uiux = UIUX(config, world_model, self.goal_enc, self.goal_dec, skill_prior=self.skill_prior)
 
     def goal_video_pred(self, data):
         n_frames = 32
@@ -91,11 +91,13 @@ class HierarchyBehavior(nn.Module):
 
         deter = post["deter"]
         goal = self.goal_enc(deter)
+        # print("skill logits", goal.base_dist.logits)
         goal_sample = goal.sample()
         goal_sample = goal_sample.reshape([*goal_sample.shape[:-2], -1]) # (batch, time, feat*feat)
         dec_deter = self.goal_dec(goal_sample).mode()
 
-        deter_stoch = self._world_model.dynamics.get_stoch(deter)
+        deter_stoch = self._world_model.dynamics.get_stoch(dec_deter)
+        # deter_stoch = self._world_model.dynamics.get_stoch(deter)
         deter_stoch = deter_stoch.reshape([*deter_stoch.shape[:-2], -1])
         inp = torch.cat([deter_stoch, dec_deter], dim=-1)
         goal_reconstruction = self._world_model.heads["decoder"](inp)["image"].mode()
@@ -129,8 +131,8 @@ class HierarchyBehavior(nn.Module):
         deter = dec
         
         # now add the stochastic state to the deterministic state, which is what the world model decoder requires
-        # stoch = self._world_model.dynamics.get_stoch(deter)
-        stoch = states["stoch"]
+        stoch = self._world_model.dynamics.get_stoch(deter)
+        # stoch = states["stoch"]
         stoch = reshape(stoch)
         inp = torch.cat([stoch, deter], dim=-1)
 
@@ -142,10 +144,21 @@ class HierarchyBehavior(nn.Module):
         truth = truth[:, random_samples]
         error = error[:, random_samples]
         
+        goal_pred = torch.cat([truth, model, error], dim=2)
+
         # return model
         # print(f"director_models::goal_pred"); ipshell()
-        return truth, model, error
+        return goal_pred
     
+
+    def viz_goal(self, goal, stoch=None):
+        if stoch == None:
+            stoch = self._world_model.dynamics.get_stoch(goal)        
+        stoch = stoch.reshape([*stoch.shape[:-2], -1])
+        inp = torch.cat([stoch, goal], dim=-1)
+        goal_img = self._world_model.heads["decoder"](inp)["image"].mode() + 0.5
+        return goal_img
+
     def extr_reward(self, state):
         # extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mode() # NOTE: Original uses mean()[1:] 
         extrR = self._world_model.heads["reward"](self._world_model.dynamics.get_feat(state)).mean()[1:]
@@ -215,10 +228,12 @@ class HierarchyBehavior(nn.Module):
     def train_goal_vae(self, data, metrics):
         # context feat is thes 
         # feat = context["feat"].detach()
-        feat = data["deter"].detach()
+        # feat = data["deter"].detach()
+        feat = data["deter"]
         with tools.RequiresGrad(self.goal_enc):
             with tools.RequiresGrad(self.goal_dec):
                 enc = self.goal_enc(feat)
+                # pre_loss_probs = enc.base_dist.probs.detach().cpu() ## DEBUG
                 x = enc.sample() # discrete one-hot grid
                 x = x.reshape([x.shape[0], x.shape[1], -1]) # (time, batch, feat0*feat1)
                 dec = self.goal_dec(x)
@@ -226,13 +241,33 @@ class HierarchyBehavior(nn.Module):
                 if self._config.goal_vae_kl:
                     # NOTE: Should kl and recreation loss be scaled by scheduled constants as in the world model?
                     kl = kl_nonorm = torch.distributions.kl.kl_divergence(enc, self.skill_prior)
-                    kl, _ = self.kl_autoadapt(kl_nonorm)
+                    if self._config.goal_vae_kl_autoadapt:
+                        kl, _ = self.kl_autoadapt(kl_nonorm)
                     loss = torch.mean(rec + kl)
                 else:
                     loss = torch.mean(rec)
         
-                metrics.update(self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters())))
+                if self._config.make_dots:
+                    # create a dictionary with the named parameters of the goal encoder and decoder
+                    enc_dict = dict(self.goal_enc.named_parameters())
+                    # prefix every key in the dictionary with 'goal_enc.' to avoid name clashes
+                    enc_dict = {'goal_enc.' + k : v for k,v in enc_dict.items()}
+                    # create a dictionary with the named parameters of the goal encoder and decoder
+                    dec_dict = dict(self.goal_dec.named_parameters())
+                    # prefix every key in the dictionary with 'goal_dec.' to avoid name clashes
+                    dec_dict = {'goal_dec.' + k : v for k,v in dec_dict.items()}
+                    # concatenate the two dictionaries
+                    named_parameters = {**enc_dict, **dec_dict}
+                else:
+                    named_parameters = None
+
+                metrics.update(self.goal_ae_opt(loss, list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()), named_parameters=named_parameters))
         
+        # with torch.no_grad(): ## DEBUG
+        #     enc = self.goal_enc(feat)
+        #     post_loss_probs = enc.base_dist.probs.detach().cpu()
+        #     print(f"\tvae probs: {pre_loss_probs[0, 0, 0, 0:2]} {post_loss_probs[0, 0, 0, 0:2]}")
+
         metrics.update(tools.tensorstats(rec.detach().cpu(), "goal_ae_rec"))
         metrics.update(tools.tensorstats(loss.detach().cpu(), "goal_ae_loss"))
 
@@ -379,8 +414,8 @@ class HierarchyBehavior(nn.Module):
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start_wm.items()}
 
-        feat = dynamics.get_feat(start) # start["deter"]
-        skill, goal = self.sample_goal(feat)
+        feat = dynamics.get_feat(start) # [stoch, deter]
+        skill, goal = self.sample_goal(start)
 
         h = start["deter"].detach() if self._stop_grad_actor else start["deter"]
         z_stoch = start["stoch"].detach() if self._stop_grad_actor else start["stoch"]
@@ -401,7 +436,7 @@ class HierarchyBehavior(nn.Module):
 
             # NOTE: step is ignored in original code. does it mess with the flatten?
             if goal is None or step % self._config.train_skill_duration == 0:
-                skill, goal = self.sample_goal(feat)
+                skill, goal = self.sample_goal(state)
 
             h = state["deter"].detach() if self._stop_grad_actor else state["deter"]
             z_stoch = state["stoch"].detach() if self._stop_grad_actor else state["stoch"]
@@ -434,12 +469,17 @@ class HierarchyBehavior(nn.Module):
         # print(f"director_models::_imagine"); ipshell()
         return feats, states, actions, skills, goals
     
-    def sample_goal(self, feat, human=False):
+    def sample_goal(self, latent, human=False):
         if human or self._config.debug_uiux:
             # sample, cluster, accept ui
-            skill = self.uiux.interface(feat) # NOTE: Blocking call
+            skill, note = self.uiux.interface(latent, self.worker.actor) # NOTE: Blocking call
+            if note == "Trust Robot": # NOTE: -1 indicates the interface has elected to defer to the system i.e. "Trust Robot"
+                feat = self._world_model.dynamics.get_feat(latent)
+                skill = self.manager.actor(feat).sample()
         else:
+            feat = self._world_model.dynamics.get_feat(latent)
             skill = self.manager.actor(feat).sample()
+
         skill = skill.reshape(-1, np.product(self._config.skill_shape))
         goal = self.goal_dec(skill).mode()
         return skill, goal
@@ -671,10 +711,13 @@ class ImagActorCritic(nn.Module):
             metrics.update(tools.tensorstats(imag_action, "imag_action"))
         metrics["actor_entropy"] = to_np(torch.mean(actor_ent))
         with tools.RequiresGrad(self):
-            metrics.update(self._actor_opt(actor_loss, self.actor.parameters()))
-            metrics.update(self._value_opt(value_loss, self.value.parameters()))
+            actor_named_params = {k: v for k, v in self.actor.named_parameters()} if self._config.make_dots else None
+            value_named_params = {k: v for k, v in self.value.named_parameters()} if self._config.make_dots else None
+            metrics.update(self._actor_opt(actor_loss, self.actor.parameters(), named_parameters=actor_named_params))
+            metrics.update(self._value_opt(value_loss, self.value.parameters(), named_parameters=value_named_params))
             if self.expl_value is not None:
-                metrics.update(self._expl_value_opt(expl_value_loss, self.expl_value.parameters()))
+                expl_value_named_params = {k: v for k, v in self.expl_value.named_parameters()} if self._config.make_dots else None
+                metrics.update(self._expl_value_opt(expl_value_loss, self.expl_value.parameters(), named_parameters=expl_value_named_params))
         return imag_feat, imag_state, imag_action, weights, metrics
 
     def _imagine(self, start, policy, horizon, repeats=None):

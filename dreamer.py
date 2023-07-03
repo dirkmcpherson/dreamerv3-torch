@@ -101,9 +101,6 @@ class Dreamer(nn.Module):
                     wtf = torch.cat([truth, model, error], dim=2) # concat along height
                     self._logger.batch_images("train_goal", to_np(wtf))
 
-                if self._config.visualize_graphs:
-                    self._logger.add_graph(self._wm, next(self._dataset))
-
                 self._logger.write(fps=True)
 
         policy_output, state = self._policy(obs, state, training)

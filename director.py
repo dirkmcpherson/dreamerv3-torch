@@ -69,7 +69,7 @@ class Director(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
-    def __call__(self, obs, reset, state=None, reward=None, training=True, human=False):
+    def __call__(self, obs, reset, step_in_ep, state=None, reward=None, training=True, human=False):
         assert not (human and training) # can't be both for now
         step = self._step
         if self._should_reset(step):
@@ -91,7 +91,9 @@ class Director(nn.Module):
                 self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
+                print(f"\ttrain_step: {self._update_count} at {step}")
             if self._should_log(step) or self._config.debug_always_update:
+                print(f"\tlog_step: {self._update_count}")
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
@@ -104,16 +106,17 @@ class Director(nn.Module):
                     self._logger.video("train_goal_vid_pred", to_np(goal_vid_pred))
 
                     # truth, model, error = self._alt_behavior.goal_pred(next(self._dataset))
-                    truth, model, error = self._task_behavior.goal_pred(next(self._dataset))
+                    goal_pred = self._task_behavior.goal_pred(next(self._dataset))
+                    
 
-                    wtf = torch.cat([truth, model, error], dim=2) # concat along height
-                    self._logger.batch_images("train_goal", to_np(wtf))
+                    self._logger.batch_images("train_goal", to_np(goal_pred))
 
                 # self._logger.add_graph(self._task_behavior.goal_enc, torch.zeros((1, 3, 1024)).to(self._config.device))
                 # self._logger.add_graph(self._task_behavior.goal_dec, torch.zeros((1, 3, 64)).to(self._config.device))
                 self._logger.write(fps=True)
+                print(f"\t\tlog_step: {self._update_count} done")
 
-        policy_output, state = self._policy(obs, state, training, human)
+        policy_output, state = self._policy(obs, state, step_in_ep, training, human)
 
         if training:
             self._step += len(reset)
@@ -125,7 +128,7 @@ class Director(nn.Module):
 
         return policy_output, state
 
-    def _policy(self, obs, state, training, human=False):
+    def _policy(self, obs, state, step_in_ep, training, human=False):
         if state is None:
             batch_size = len(obs["image"])
             latent = self._wm.dynamics.initial(len(obs["image"]))
@@ -134,6 +137,7 @@ class Director(nn.Module):
             goal = torch.zeros((batch_size, goal_dim)).to(self._config.device)
         else:
             latent, action, goal = state
+
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
         latent, _ = self._wm.dynamics.obs_step(
@@ -144,12 +148,18 @@ class Director(nn.Module):
         feat = self._wm.dynamics.get_feat(latent)
         
         # is it time to select a new goal?
-        if self._step % self._config.train_skill_duration:
-            print(f"Selecting a new goal because step {self._step} % {self._config.train_skill_duration} == 0")
+        if human:
+            img = (obs["image"].detach().cpu().numpy().squeeze()+0.5) * 255
+            action_str = {0: "noop", 1: "forward", 2: "left", 3: "right", 4: "forward_left", 5: "forward_right"}[action.detach().cpu().numpy().squeeze().argmax()]
+
+            obs_string = f"{step_in_ep} {action_str}, reward: {obs['reward'].detach().cpu().numpy().squeeze():1.2f}"
+            self._task_behavior.uiux.update_obs(img, obs_string)
+            print(f"Updating obs at step {step_in_ep}. {obs_string}")
+
+        if step_in_ep % self._config.train_skill_duration == 0:
+            # print(f"Selecting a new goal because step {step_in_ep} % {self._config.train_skill_duration} == 0")
             # NOTE: We should keep a count that starts from 0 when tasks start
-            _, goal = self._task_behavior.sample_goal(feat, human=human)
-        else:
-            print(f"Didn't select a new goal because step {self._step} % {self._config.train_skill_duration} != 0")
+            _, goal = self._task_behavior.sample_goal(latent, human=human)
         
         gc_feat = torch.cat([feat, goal], dim=-1)
 
@@ -208,84 +218,7 @@ class Director(nn.Module):
             else:
                 self._metrics[name].append(value)
 
-    def viz_goal(self, goal, stoch=None):
-        if stoch == None:
-            stoch = self._wm.dynamics.get_stoch(goal)        
-        stoch = stoch.reshape([*stoch.shape[:-2], -1])
-        inp = torch.cat([stoch, goal], dim=-1)
-        goal_img = self._world_model.heads["decoder"](inp)["image"].mode() + 0.5
-        return goal_img
-
-
-def count_steps(folder):
-    return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
-
-
-def make_dataset(episodes, config):
-    generator = tools.sample_episodes(episodes, config.batch_length)
-    dataset = tools.from_generator(generator, config.batch_size)
-    return dataset
-
-from dreamer import make_env
-
-class ProcessEpisodeWrap:
-    eval_scores = []
-    eval_lengths = []
-    last_step_at_eval = -1
-    eval_done = False
-
-    @classmethod
-    def process_episode(cls, config, logger, mode, train_eps, eval_eps, episode):
-        directory = dict(train=config.traindir, eval=config.evaldir)[mode]
-        cache = dict(train=train_eps, eval=eval_eps)[mode]
-        # this saved episodes is given as train_eps or eval_eps from next call
-        filename = tools.save_episodes(directory, [episode])[0]
-        length = len(episode["reward"]) - 1
-        score = float(episode["reward"].astype(np.float64).sum())
-        video = episode["image"]
-        cache[str(filename)] = episode
-        if mode == "train":
-            total = 0
-            for key, ep in reversed(sorted(cache.items(), key=lambda x: x[0])):
-                if not config.dataset_size or total <= config.dataset_size - length:
-                    total += len(ep["reward"]) - 1
-                else:
-                    del cache[key]
-            logger.scalar("dataset_size", total)
-            # use dataset_size as log step for a condition of envs > 1
-            log_step = total * config.action_repeat
-        elif mode == "eval":
-            # keep only last item for saving memory
-            while len(cache) > 1:
-                # FIFO
-                cache.popitem()
-            # start counting scores for evaluation
-            if cls.last_step_at_eval != logger.step:
-                cls.eval_scores = []
-                cls.eval_lengths = []
-                cls.eval_done = False
-                cls.last_step_at_eval = logger.step
-
-            cls.eval_scores.append(score)
-            cls.eval_lengths.append(length)
-            # ignore if number of eval episodes exceeds eval_episode_num
-            if len(cls.eval_scores) < config.eval_episode_num or cls.eval_done:
-                return
-            score = sum(cls.eval_scores) / len(cls.eval_scores)
-            length = sum(cls.eval_lengths) / len(cls.eval_lengths)
-            episode_num = len(cls.eval_scores)
-            log_step = logger.step
-            logger.video(f"{mode}_policy", video[None])
-            cls.eval_done = True
-
-        print(f"{mode.title()} episode has {length} steps and return {score:.1f}.")
-        logger.scalar(f"{mode}_return", score)
-        logger.scalar(f"{mode}_length", length)
-        logger.scalar(
-            f"{mode}_episodes", len(cache) if mode == "train" else episode_num
-        )
-        logger.write(step=log_step)
-
+from dreamer import make_env, make_dataset, count_steps, ProcessEpisodeWrap
 
 def main(config):
     logdir = pathlib.Path(config.logdir).expanduser()
@@ -362,6 +295,7 @@ def main(config):
     ).to(config.device)
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest_model.pt").exists():
+        print(f"Loding pre-trained model from {logdir / 'latest_model.pt'}")
         agent.load_state_dict(torch.load(logdir / "latest_model.pt"))
         agent._should_pretrain._once = False
 
@@ -384,12 +318,13 @@ def main(config):
             #     obs[k] = torch.tensor(v, dtype=torch.float32).unsqueeze(0)
             for ep in range(10):
                 done = np.array([False])
+                step_in_ep = 0
                 while not any(done):
                     # for k, v in obs.items():
                     #     obs[k] = torch.tensor(v, dtype=torch.float32)
                     obs["is_terminal"] = torch.Tensor(obs["is_terminal"])
                     obs["image"] = torch.Tensor(obs["image"]).unsqueeze(0)
-                    action, state = agent(obs, done, state, training=False, human=False)
+                    action, state = agent(obs, done, step_in_ep=step_in_ep, state=state, training=False, human=False)
                     action["action"] = to_np(action["action"])[0]
                     obs, reward, done, info = env.step(action)
                     # print("obs", obs)
@@ -418,6 +353,7 @@ def main(config):
                         cv2.waitKey(1)
                     time.sleep(0.01)
                     done = np.array([done])
+                    step_in_ep += 1
             exit()
         #############################
 
@@ -428,24 +364,37 @@ def main(config):
         while user_steps < config.debug_user_steps:
             logger.write()
     else:
+        loops = 0
         while agent._step < config.steps:
             logger.write()
-            print("Start evaluation.")
+            # if config.only_human_policy:
+            #     print("Only running human policy, then quitting")
+            #     human_policy = functools.partial(agent, training=False, human=True)
+            #     state = tools.simulate(human_policy, train_envs, config.eval_every, state=state, include_episode_step=True)
+            #     break
+
+            print("----------evaluation-------------")
             eval_policy = functools.partial(agent, training=False)
-            tools.simulate(eval_policy, eval_envs, episodes=config.eval_episode_num)
-            print(f"\tFinished {config.eval_episode_num} episodes.")
+            tools.simulate(eval_policy, eval_envs, episodes=config.eval_episode_num, include_episode_step=True)
+            
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
                 print(f"\tFinished eval video prediction.")
-            print("Start training.")
-            state = tools.simulate(agent, train_envs, steps=config.eval_every, state=state)
 
-            if config.human_policy:
-                print("Start human policy.")
+            print("-----------training--------------")
+            state = tools.simulate(agent, train_envs, steps=config.eval_every, state=state, include_episode_step=True)
+
+            if config.human_policy and (loops % config.human_train_interval) == 0 and (config.human_skip_first_train or loops > 0):
+                ''' 
+                interactive mode
+                '''
+                print("-----------human--------------")
                 human_policy = functools.partial(agent, training=False, human=True)
-                state = tools.simulate(human_policy, train_envs, config.eval_every, state=state)
+                state = tools.simulate(human_policy, train_envs, steps=config.human_steps, state=state, include_episode_step=True)
             torch.save(agent.state_dict(), logdir / "latest_model.pt")
+            loops += 1
+
     for env in train_envs + eval_envs:
         try:
             env.close()

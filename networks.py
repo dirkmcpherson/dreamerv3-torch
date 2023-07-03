@@ -701,6 +701,7 @@ class MLP(nn.Module):
             if (len(self._shape) == 2):
                 assert self._dist == "onehot", "only onehot is supported for 2d shape"
                 mean = mean.reshape(mean.shape[:-1] + self._shape)
+                # print(f"mean shape: {mean.shape} mean mean {mean.mean():1.4f} mean std {mean.std():1.4f}")
 
             return self.dist(self._dist, mean, std, self._shape)
 

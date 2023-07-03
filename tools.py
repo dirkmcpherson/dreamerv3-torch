@@ -9,6 +9,7 @@ import time
 import uuid
 
 import numpy as np
+import cv2
 
 import torch
 from torch import nn
@@ -16,6 +17,7 @@ from torch.nn import functional as F
 from torch import distributions as torchd
 from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
+from torchviz import make_dot
 
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -135,7 +137,7 @@ class Logger:
         self._writer.add_graph(model, input_to_model)
 
 
-def simulate(agent, envs, steps=0, episodes=0, state=None):
+def simulate(agent, envs, steps=0, episodes=0, state=None, include_episode_step=False):
     # Initialize or unpack simulation state.
     if state is None:
         step, episode = 0, 0
@@ -144,8 +146,12 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         obs = [None] * len(envs)
         agent_state = None
         reward = [0] * len(envs)
+        step_in_ep = np.zeros(len(envs), np.int32)
     else:
-        step, episode, done, length, obs, agent_state, reward = state
+        if include_episode_step:
+            step, episode, done, length, obs, agent_state, reward, step_in_ep = state
+        else:
+            step, episode, done, length, obs, agent_state, reward = state
     start_time = time.time()
     while (steps and step < steps) or (episodes and episode < episodes):
         # Reset envs if necessary.
@@ -154,10 +160,21 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
             results = [envs[i].reset() for i in indices]
             for index, result in zip(indices, results):
                 obs[index] = result
-            reward = [reward[i] * (1 - done[i]) for i in range(len(envs))]
+                if include_episode_step:
+                    step_in_ep[index] = 0
+            reward = [reward[i] * (1 - done[i]) for i in range(len(envs))] # reset reward to 0 if done
         # Step agents.
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0]}
-        action, agent_state = agent(obs, done, agent_state, reward)
+        if include_episode_step:
+            action, agent_state = agent(obs, done, step_in_ep, agent_state, reward)
+        else:
+            action, agent_state = agent(obs, done, agent_state, reward)
+
+        
+        # Render
+        # cv2.imshow('img', obs['image'].squeeze(0))
+        # cv2.waitKey(10)
+
         if isinstance(action, dict):
             action = [
                 {k: np.array(action[k][i].detach().cpu()) for k in action}
@@ -172,14 +189,24 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
         obs = list(obs)
         reward = list(reward)
         done = np.stack(done)
-        if int(done.sum()) > 0:
-            print(f"\t\tFinished episode {episode} at step {step}. time {(time.time() - start_time) / 60:1.2f}m"); 
         episode += int(done.sum())
         length += 1
         step += (done * length).sum()
         length *= 1 - done
+        if include_episode_step:
+            step_in_ep += 1
+        if int(done.sum()) > 0:
+            print(f"\tFinished episode {episode} at step {step_in_ep} total simulated: {steps}. time {(time.time() - start_time) / 60:1.2f}m"); 
 
-    return (step - steps, episode - episodes, done, length, obs, agent_state, reward)
+
+    if include_episode_step:
+        state = (step - steps, episode - episodes, done, length, obs, agent_state, reward, step_in_ep)
+    else:
+        state = (step - steps, episode - episodes, done, length, obs, agent_state, reward)
+
+    # print(f"step {step} episode {episode} done {done} length {length} obs {obs} agent_state {agent_state} reward {reward} step_in_ep {step_in_ep}")
+    print(f"step {step} episode {episode} done {done} length {length} reward {reward} step_in_ep {step_in_ep}")
+    return state
 
 
 def save_episodes(directory, episodes):
@@ -624,8 +651,9 @@ class Optimizer:
             "momentum": lambda: torch.optim.SGD(parameters, lr=lr, momentum=0.9),
         }[opt]()
         self._scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        self._lr = lr
 
-    def __call__(self, loss, params, retain_graph=False):
+    def __call__(self, loss, params, retain_graph=False, named_parameters=None):
         assert len(loss.shape) == 0, loss.shape
         metrics = {}
         metrics[f"{self._name}_loss"] = loss.detach().cpu().numpy()
@@ -640,6 +668,12 @@ class Optimizer:
         self._scaler.step(self._opt)
         self._scaler.update()
         # self._opt.step()
+
+        if named_parameters is not None:
+            dot = make_dot(loss, named_parameters)
+            dot.render(f"{self._name}_DAG", format="png")
+            print(f"wrote {self._name}_DAG.png")
+
         self._opt.zero_grad()
         metrics[f"{self._name}_grad_norm"] = norm.item()
         return metrics
@@ -648,8 +682,9 @@ class Optimizer:
         nontrivial = self._wd_pattern != r".*"
         if nontrivial:
             raise NotImplementedError
+        print(f"JS applying weight decay to {self._wd_pattern}")
         for var in varibs:
-            var.data = (1 - self._wd) * var.data
+            var.data = (1 - self._wd * self._lr) * var.data
 
 
 def args_type(default):

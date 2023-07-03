@@ -8,7 +8,7 @@ defaults:
   seed: 0
   steps: 1e6
   eval_every: 3e4
-  log_every: 1e3
+  log_every: 5e3
   eval_episode_num: 10
   reset_every: 0
   device: 'cuda:0'
@@ -17,9 +17,9 @@ defaults:
   debug: False
   expl_gifs: False
   video_pred_log: True
-  visualize_graphs: False
-  human_policy: True # Let the human select goals in place of the manager
+  make_dots: False
   show_trained_policy: False # Show the trained policy and exit
+
 
   # Environment
   task: 'dmc_walker_walk'
@@ -28,7 +28,7 @@ defaults:
   action_repeat: 2
   time_limit: 1000
   grayscale: False
-  prefill: 5e3 # 2500
+  prefill: 2500
   eval_noise: 0.0
   reward_EMA: True
 
@@ -138,15 +138,17 @@ defaults:
   goal_ae_units: 512
   goal_ae_grad_clip: 100.0
   goal_ae_opt_eps: 1e-6
-  goal_ae_lr: 1e-5 # 1e-4
-  goal_ae_wd: 1e-2
+  goal_ae_lr: 1e-4 # 1e-5 
+  goal_ae_wd: 0 # 1e-2 # NOTE: DH applies weight_decay * lr to kernel layers of his MLPs, It looks like there are fewer kernel layers than layers, but in theory every dense layer of weights is a "kernel" layer. The point is that
+  # goal_ae_wd_pattern: 'kernel'
   goal_vae_kl: True
+  goal_vae_kl_autoadapt: False
 # goal_encoder: {layers: 4, units: 512, act: elu, norm: layer, dist: onehot, outscale: 0.1, unimix: 0.0, inputs: [goal]}
 # goal_decoder: {layers: 4, units: 512, act: elu, norm: layer, dist: mse, outscale: 0.1, inputs: [skill]}
   goal_encoder: 
-    {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "onehot", outscale: 0.1} # unimix_ratio: 0.0,
+    {layers: 4, units: 512, act: "ELU", norm: "LayerNorm", dist: "onehot", outscale: 0.1} # unimix_ratio: 0.0,
   goal_decoder: 
-    {layers: 4, units: 512, act: "SiLU", norm: "LayerNorm", dist: "mse", outscale: 0.1} # dist: mse in original
+    {layers: 4, units: 512, act: "ELU", norm: "LayerNorm", dist: "mse", outscale: 0.1} # dist: mse in original
   train_skill_duration: 8
   kl_autoadapt: 
     {impl: mult, scale: 0.0, target: 10.0, min: 1e-5, max: 1.0}
@@ -156,6 +158,16 @@ defaults:
   debug_always_update: False
   debug_uiux: False
   debug_user_steps: 100
+
+  # Director UIUX
+  human_train_interval: 3
+  human_n_samples: 32
+  human_n_clusters: 32
+  human_policy: True # Let the human select goals in place of the manager
+  human_skip_first_train: False # Run the human policy the first time through the loop
+  only_human_policy: False # just run the human policy once and first
+
+  
 
   # Exploration
   # expl_behavior: 'greedy'
@@ -246,7 +258,13 @@ debug:
   imag_gradient: 'reinforce'
   
   task: 'pinpad_three'
-  
+  time_limit: 500
+
+  # goal_encoder.layers: 2
+  # goal_decoder.layers: 2
+  # goal_encoder.units: 64
+  # goal_decoder.units: 64
+
   # memory maze
   # task: MemoryMaze_9x9
   # action_repeate: 2
@@ -279,6 +297,18 @@ MemoryMaze:
   imag_gradient: 'reinforce'
   task: 'MemoryMaze_9x9'
 
+  time_limit: 100  # single episode max duration (effected by wrappers). halved for 2x action repeat.
+  eval_episode_num: 1 # how many episodes we evaluate for
+  eval_every: 50 # number of steps to train for, only checked at the end of episodes
+  prefill: 50 # number of steps to prefill the replay buffer
+  pretrain: 1
 
+  human_train_interval: 3
+  human_clusters: 4
+  human_samples: 16
+  human_fps: 30
+  human_steps: 1
+  human_policy: True # Let the human select goals in place of the manager
+  human_skip_first_train: False # Run the human policy the first time through the loop
 
 
