@@ -432,6 +432,10 @@ class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
         else:
             super().__init__(logits=logits, probs=probs)
 
+        shape = logits.shape if logits is not None else probs.shape
+        self.minent = 0.0
+        self.maxent = np.prod(shape[:-1]) * np.log(shape[-1])
+
     def mode(self):
         _mode = F.one_hot(
             torch.argmax(super().logits, axis=-1), super().logits.shape[-1]

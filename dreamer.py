@@ -221,6 +221,11 @@ def make_env(config, mode):
 
         env = minecraft.make_env(task, size=config.size, break_speed=config.break_speed)
         env = wrappers.OneHotAction(env)
+    elif suite == 'pinpad':
+        import envs.pinpad as pinpad
+        assert config.size == (64, 64), "PinPad only supports 64x64 images " + str(config.size)
+        env = pinpad.PinPad(task)
+        env = wrappers.OneHotAction(env)
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)
@@ -370,7 +375,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs = yaml.safe_load(
+    y = yaml.YAML(typ="safe", pure=True)
+    configs = y.load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
     )
 

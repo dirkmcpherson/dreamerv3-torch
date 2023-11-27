@@ -288,9 +288,32 @@ class ImagBehavior(nn.Module):
         if self._config.reward_EMA:
             self.reward_ema = RewardEMA(device=self._config.device)
 
+        #### GOAL AE START
+        # the goal autencoder converts the feature representation (h? 1024?) to a one-hot of the goal
+        self.goal_enc = networks.MLP(
+            config.dyn_deter,
+            config.skill_shape, # size of output [8x8]
+            **config.goal_encoder
+        )
+        self.goal_dec = networks.MLP(
+            np.prod(config.skill_shape),
+            config.dyn_deter,
+            **config.goal_decoder
+        )
+        kw = dict(wd=config.goal_ae_wd, opt=config.opt, use_amp=self._use_amp)
+        self.goal_ae_opt = tools.Optimizer(
+            "goal_ae",
+            list(self.goal_enc.parameters()) + list(self.goal_dec.parameters()),
+            config.goal_ae_lr,
+            config.goal_ae_opt_eps,
+            config.goal_ae_grad_clip,
+            **kw,
+        )
+        #### GOAL AE END
+
     def _train(
         self,
-        start,
+        start, 
         objective=None,
         action=None,
         reward=None,

@@ -1,6 +1,6 @@
 defaults:
 
-  logdir: null
+  logdir: "./logs"
   traindir: null
   evaldir: null
   offline_traindir: ''
@@ -68,6 +68,10 @@ defaults:
   unimix_ratio: 0.01
   action_unimix_ratio: 0.01
   initial: 'learned'
+  skill_shape: [8,8]
+  goal_encoder: {layers: 4, units: 512, act: "ELU", norm: "LayerNorm", dist: "onehot", outscale: 0.1} # unimix_ratio: 0.0,
+  goal_decoder: {layers: 4, units: 512, act: "ELU", norm: "LayerNorm", dist: "mse", outscale: 0.1} # dist: mse in original
+  goal_ae_wd: 0
 
   # Training
   batch_size: 16
@@ -87,7 +91,10 @@ defaults:
   slow_target_update: 1
   slow_target_fraction: 0.02
   opt: 'adam'
-
+  goal_ae_lr: 1e-4 # 1e-5 
+  goal_ae_grad_clip: 100.0
+  goal_ae_opt_eps: 1e-6
+  
   # Behavior.
   discount: 0.997
   discount_lambda: 0.95
@@ -206,6 +213,32 @@ memorymaze:
   actor_dist: 'onehot'
   imag_gradient: 'reinforce'
   task: 'memorymaze_9x9'
+
+pinpad:
+  steps: 2e5
+  actor_dist: 'onehot'
+  imag_gradient: 'reinforce' 
+  task: 'pinpad_three'
+  action_repeat: 1
+  time_limit: 2000
+  eval_every: 20000
+  log_every: 2000
+  video_log_every: 5000
+  eval_episode_num: 3
+  prefill: 2500
+  action_map: {0: "noop", 1: "down", 2: "up", 3: "right", 4: "left"}
+
+  human_train_interval: 1
+  human_train_after_steps: 2e4
+  human_steps: 100
+  human_skip_first_train: True # Run the human policy the first time through the loop
+
+  human_cluster_technique: 'color'
+  human_clusters: 16
+  human_samples: 128
+
+  skill_shape: [8, 8]
+
 
 debug:
   debug: True

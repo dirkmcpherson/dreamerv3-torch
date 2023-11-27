@@ -816,7 +816,15 @@ class ActionHead(nn.Module):
             dist = tools.ContDist(torchd.independent.Independent(dist, 1))
         elif self._dist == "onehot":
             x = self._dist_layer(x)
-            dist = tools.OneHotDist(x, unimix_ratio=self._unimix_ratio)
+            if type(self._size) == int:
+                dist = tools.OneHotDist(x, unimix_ratio=self._unimix_ratio)
+            elif len(self._size) == 2:
+                x = x.reshape(x.shape[:-1] + self._size) # (batch, skill_shape, skill_shape)
+                dist = torchd.Independent(
+                    tools.OneHotDist(x, unimix_ratio=self._unimix_ratio), 1
+                )
+            else:
+                raise NotImplementedError
         elif self._dist == "onehot_gumble":
             x = self._dist_layer(x)
             temp = self._temp
