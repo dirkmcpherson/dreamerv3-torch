@@ -15,6 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch import distributions as torchd
 from torch.utils.tensorboard import SummaryWriter
+from constants import STATIC_CONSTANTS
 
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -746,23 +747,49 @@ class Optimizer:
         }[opt]()
         self._scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    def __call__(self, loss, params, retain_graph=True):
+    @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
+    def __call_compute(self, loss, params, retain_graph=True):
         assert len(loss.shape) == 0, loss.shape
         metrics = {}
         metrics[f"{self._name}_loss"] = loss.detach().cpu().numpy()
         self._opt.zero_grad()
         self._scaler.scale(loss).backward(retain_graph=retain_graph)
         self._scaler.unscale_(self._opt)
-        # loss.backward(retain_graph=retain_graph)
-        norm = torch.nn.utils.clip_grad_norm_(params, self._clip)
         if self._wd:
             self._apply_weight_decay(params)
         self._scaler.step(self._opt)
         self._scaler.update()
         # self._opt.step()
         self._opt.zero_grad()
+
+    def __call_metrics(self, loss, params):
+        # This method is used to compute metrics without applying gradients
+        assert len(loss.shape) == 0, loss.shape
+        metrics = {}
+        metrics[f"{self._name}_loss"] = loss.detach().cpu().numpy()
+        norm = torch.nn.utils.clip_grad_norm_(params, self._clip)
         metrics[f"{self._name}_grad_norm"] = to_np(norm)
         return metrics
+
+    def __call__(self, loss, params, retain_graph=True):
+        self.__call_compute(loss, params, retain_graph=retain_graph)
+        return self.__call_metrics(loss, params)
+    #     assert len(loss.shape) == 0, loss.shape
+    #     metrics = {}
+    #     metrics[f"{self._name}_loss"] = loss.detach().cpu().numpy()
+    #     self._opt.zero_grad()
+    #     self._scaler.scale(loss).backward(retain_graph=retain_graph)
+    #     self._scaler.unscale_(self._opt)
+    #     # loss.backward(retain_graph=retain_graph)
+    #     norm = torch.nn.utils.clip_grad_norm_(params, self._clip)
+    #     if self._wd:
+    #         self._apply_weight_decay(params)
+    #     self._scaler.step(self._opt)
+    #     self._scaler.update()
+    #     # self._opt.step()
+    #     self._opt.zero_grad()
+    #     metrics[f"{self._name}_grad_norm"] = to_np(norm)
+    #     return metrics
 
     def _apply_weight_decay(self, varibs):
         nontrivial = self._wd_pattern != r".*"
@@ -856,8 +883,8 @@ class Every:
 
 
 class Once:
-    def __init__(self):
-        self._once = True
+    def __init__(self, skip=False):
+        self._once = not skip
 
     def __call__(self):
         if self._once:

@@ -20,6 +20,7 @@ from parallel import Parallel, Damy
 import torch
 from torch import nn
 from torch import distributions as torchd
+from constants import STATIC_CONSTANTS
 
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -43,11 +44,11 @@ class Dreamer(nn.Module):
         self._dataset = dataset
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
         self._task_behavior = models.ImagBehavior(config, self._wm)
-        if (
-            config.compile and os.name != "nt"
-        ):  # compilation is not supported on windows
-            self._wm = torch.compile(self._wm)
-            self._task_behavior = torch.compile(self._task_behavior)
+        # if (
+        #     config.compile and os.name != "nt"
+        # ):  # compilation is not supported on windows
+        #     self._wm = torch.compile(self._wm)
+        #     self._task_behavior = torch.compile(self._task_behavior)
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -193,6 +194,11 @@ def make_env(config, mode, id):
 
         env = minecraft.make_env(task, size=config.size, break_speed=config.break_speed)
         env = wrappers.OneHotAction(env)
+    elif suite == 'pinpad':
+        import envs.pinpad as pinpad
+        # assert config.size == (64, 64), "PinPad only supports 64x64 images " + str(config.size)
+        env = pinpad.PinPad(task, size=config.size)
+        env = wrappers.OneHotAction(env)
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)
@@ -204,12 +210,15 @@ def make_env(config, mode, id):
 
 
 def main(config):
+    import time
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
         tools.enable_deterministic_run()
-    logdir = pathlib.Path(config.logdir).expanduser()
-    config.traindir = config.traindir or logdir / "train_eps"
-    config.evaldir = config.evaldir or logdir / "eval_eps"
+    timestr = time.strftime("%Y%m%dT%H%M%S")
+    logdir = (pathlib.Path(config.logdir) / timestr).expanduser()
+    config.traindir = config.traindir or logdir / f"train_eps"
+    config.evaldir = config.evaldir or logdir / f"eval_eps"
+    config.demodir = config.demodir
     config.steps //= config.action_repeat
     config.eval_every //= config.action_repeat
     config.log_every //= config.action_repeat
@@ -234,6 +243,21 @@ def main(config):
     else:
         directory = config.evaldir
     eval_eps = tools.load_episodes(directory, limit=1)
+
+    # if demodir is set, load the demos into train_eps
+    if config.demodir:
+        demodir = pathlib.Path(config.demodir).expanduser()
+        print("Load demos from", demodir)
+        demo_eps = tools.load_episodes(demodir, limit=config.dataset_size)
+        total_r = 0
+        _print_keys = tools.Once()
+        for epkey, ep in demo_eps.items():
+            if _print_keys():
+                print("Demo keys:", list(ep.keys()))
+            train_eps[epkey] = ep
+            total_r += ep["reward"].sum()
+        print(f"Total reward of demos: {total_r}")
+
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
     eval_envs = [make("eval", i) for i in range(config.envs)]
@@ -249,7 +273,8 @@ def main(config):
 
     state = None
     if not config.offline_traindir:
-        prefill = max(0, config.prefill - count_steps(config.traindir))
+        nsteps = count_steps(config.traindir) + (count_steps(pathlib.Path(config.demodir)) if config.demodir else 0)   
+        prefill = max(0, config.prefill - nsteps)
         print(f"Prefill dataset ({prefill} steps).")
         if hasattr(acts, "discrete"):
             random_actor = tools.OneHotDist(
@@ -299,9 +324,10 @@ def main(config):
         agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
+    _skip_first_eval = tools.Once(skip=not config.skip_first_eval)
     while agent._step < config.steps + config.eval_every:
         logger.write()
-        if config.eval_episode_num > 0:
+        if config.eval_episode_num > 0 and not _skip_first_eval():
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
             tools.simulate(
@@ -343,9 +369,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs = yaml.safe_load(
-        (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
-    )
+    # configs = yaml.safe_load(
+    #     (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
+    # )
+
+    import ruamel.yaml
+    yaml = ruamel.yaml.YAML(typ='safe', pure=True)
+    configs = yaml.load((pathlib.Path(__file__).parent / "configs.yaml").read_text())
+
 
     def recursive_update(base, update):
         for key, value in update.items():

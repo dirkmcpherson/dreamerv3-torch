@@ -4,6 +4,7 @@ from torch import nn
 
 import networks
 import tools
+from constants import STATIC_CONSTANTS
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -51,6 +52,7 @@ class WorldModel(nn.Module):
             config.num_actions,
             self.embed_size,
             config.device,
+            config.dyn_gru_blocks
         )
         self.heads = nn.ModuleDict()
         if config.dyn_discrete:
@@ -170,7 +172,9 @@ class WorldModel(nn.Module):
         post = {k: v.detach() for k, v in post.items()}
         return post, context, metrics
 
+
     # this function is called during both rollout and training
+    @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
     def preprocess(self, obs):
         obs = {
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
@@ -182,9 +186,9 @@ class WorldModel(nn.Module):
             # (batch_size, batch_length) -> (batch_size, batch_length, 1)
             obs["discount"] = obs["discount"].unsqueeze(-1)
         # 'is_first' is necesarry to initialize hidden state at training
-        assert "is_first" in obs
+        # assert "is_first" in obs
         # 'is_terminal' is necesarry to train cont_head
-        assert "is_terminal" in obs
+        # assert "is_terminal" in obs
         obs["cont"] = (1.0 - obs["is_terminal"]).unsqueeze(-1)
         return obs
 

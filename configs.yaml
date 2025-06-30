@@ -1,6 +1,8 @@
 defaults:
 
+  skip_first_eval: False
   logdir: null
+  demodir: null
   traindir: null
   evaldir: null
   offline_traindir: ''
@@ -15,7 +17,7 @@ defaults:
   reset_every: 0
   device: 'cuda:0'
   compile: True
-  precision: 32
+  precision: 16
   debug: False
   video_pred_log: True
 
@@ -32,6 +34,7 @@ defaults:
   # Model
   dyn_hidden: 512
   dyn_deter: 512
+  dyn_gru_blocks: 8
   dyn_stoch: 32
   dyn_discrete: 32
   dyn_rec_depth: 1
@@ -175,6 +178,19 @@ memorymaze:
   actor: {dist: 'onehot', std: 'none'}
   imag_gradient: 'reinforce'
   task: 'memorymaze_9x9'
+
+pinpad_four:
+  size: [64, 64]
+  task: 'pinpad_four'
+  steps: 4e5
+  envs: 1
+  train_ratio: 1024
+  video_pred_log: true
+  eval_episode_num: 100
+  actor: {dist: 'onehot', std: 'none'}
+  imag_gradient: 'reinforce'
+  action_repeat: 1
+  time_limit: 150
 
 debug:
   debug: True

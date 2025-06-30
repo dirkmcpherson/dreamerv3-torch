@@ -6,8 +6,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import distributions as torchd
-
+from blocks import BlockGRUCell
 import tools
+from constants import STATIC_CONSTANTS
 
 
 class RSSM(nn.Module):
@@ -28,6 +29,7 @@ class RSSM(nn.Module):
         num_actions=None,
         embed=None,
         device=None,
+        gru_blocks=1,
     ):
         super(RSSM, self).__init__()
         self._stoch = stoch
@@ -45,6 +47,11 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
+        self._blocks = gru_blocks
+        assert deter % self._blocks == 0, "deter must be divisible by blocks. Got {} and {} = {}".format(
+            deter, self._blocks, deter % self._blocks
+        )
+
         inp_layers = []
         if self._discrete:
             inp_dim = self._stoch * self._discrete + num_actions
@@ -56,7 +63,16 @@ class RSSM(nn.Module):
         inp_layers.append(act())
         self._img_in_layers = nn.Sequential(*inp_layers)
         self._img_in_layers.apply(tools.weight_init)
-        self._cell = GRUCell(self._hidden, self._deter, norm=norm)
+
+        if self._blocks == 1:
+            self._cell = GRUCell(self._hidden, self._deter, norm=norm)
+        else:
+            # print in red
+            print(
+                f"\033[91mUsing BlockGRUCell with {self._blocks} blocks for RSSM.~~Experimental~~ \033[0m"
+            )
+            self._cell = BlockGRUCell(self._hidden, self._deter,
+                                      g=self._blocks, norm=norm)
         self._cell.apply(tools.weight_init)
 
         img_out_layers = []
@@ -171,6 +187,7 @@ class RSSM(nn.Module):
             )
         return dist
 
+    @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
         # initialize all prev_state
         if prev_state == None or torch.sum(is_first) == len(is_first):
@@ -205,6 +222,7 @@ class RSSM(nn.Module):
         post = {"stoch": stoch, "deter": prior["deter"], **stats}
         return post, prior
 
+    @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
     def img_step(self, prev_state, prev_action, sample=True):
         # (batch, stoch, discrete_num)
         prev_stoch = prev_state["stoch"]
@@ -216,7 +234,7 @@ class RSSM(nn.Module):
         x = torch.cat([prev_stoch, prev_action], -1)
         # (batch, stoch * discrete_num + action, embed) -> (batch, hidden)
         x = self._img_in_layers(x)
-        for _ in range(self._rec_depth):  # rec depth is not correctly implemented
+        for _ in range(self._rec_depth):
             deter = prev_state["deter"]
             # (batch, hidden), (batch, deter) -> (batch, deter), (batch, deter)
             x, deter = self._cell(x, [deter])
@@ -345,6 +363,7 @@ class MultiEncoder(nn.Module):
             )
             self.outdim += mlp_units
 
+    @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
     def forward(self, obs):
         outputs = []
         if self.cnn_shapes:
@@ -418,6 +437,7 @@ class MultiDecoder(nn.Module):
             )
         self._image_dist = image_dist
 
+    # @torch.compile(disable=STATIC_CONSTANTS.COMPILE)
     def forward(self, features):
         dists = {}
         if self.cnn_shapes:
