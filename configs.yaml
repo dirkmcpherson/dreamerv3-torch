@@ -175,15 +175,26 @@ minecraft:
 memorymaze:
   steps: 1e8
   action_repeat: 2
-  actor: {dist: 'onehot', std: 'none'}
+  actor: {dist: 'onehot', std: 'none', layers: 3}
   imag_gradient: 'reinforce'
   task: 'memorymaze_9x9'
+
+  units: 512
+  encoder: {cnn_depth: 32, mlp_layers: 3}
+  decoder: {cnn_depth: 32, mlp_layers: 3}
+  dyn_hidden: 512
+  dyn_deter: 4096
+  dyn_stoch: 32
+  dyn_discrete: 32
+  critic: {layers: 3} 
+  reward_head: {layers: 1}
+  cont_head: {layers: 1}
 
 pinpad_four:
   size: [64, 64]
   task: 'pinpad_four'
-  steps: 4e5
-  envs: 1
+  steps: 1e4
+  envs: 10
   train_ratio: 1024
   video_pred_log: true
   eval_episode_num: 100

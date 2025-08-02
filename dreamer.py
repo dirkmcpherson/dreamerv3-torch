@@ -211,12 +211,13 @@ def make_env(config, mode, id):
 
 def main(config):
     import time
+    config.seed = np.random.randint(0, 2**31 - 1)
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
         tools.enable_deterministic_run()
     timestr = time.strftime("%Y%m%dT%H%M%S")
     logdir = (pathlib.Path(config.logdir) / timestr).expanduser()
-    config.traindir = config.traindir or logdir / f"train_eps"
+    config.traindir = pathlib.Path(config.traindir).expanduser() or logdir / f"train_eps"
     config.evaldir = config.evaldir or logdir / f"eval_eps"
     config.demodir = config.demodir
     config.steps //= config.action_repeat
@@ -257,6 +258,10 @@ def main(config):
             train_eps[epkey] = ep
             total_r += ep["reward"].sum()
         print(f"Total reward of demos: {total_r}")
+        if total_r == 0:
+            print("Warning: total reward of demos is 0, this may cause problems in training. Exiting...")
+            sys.exit(0)
+
 
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
