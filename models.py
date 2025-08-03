@@ -54,6 +54,8 @@ class WorldModel(nn.Module):
             config.device,
             config.dyn_gru_blocks
         )
+        self.slow_dynamics = copy.deepcopy(self.dynamics)
+
         self.heads = nn.ModuleDict()
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
@@ -120,6 +122,7 @@ class WorldModel(nn.Module):
                 post, prior = self.dynamics.observe(
                     embed, data["action"], data["is_first"]
                 )
+                # The full resolution sequence of latent states (imagined and buttressed)
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale

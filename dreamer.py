@@ -3,6 +3,7 @@ import functools
 import os
 import pathlib
 import sys
+import collections
 
 os.environ["MUJOCO_GL"] = "osmesa"
 
@@ -56,6 +57,9 @@ class Dreamer(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
+        self.time_resolution = 2 # config.time_resolution
+        self.action_queue = collections.deque(maxlen=self.time_resolution)
+
     def __call__(self, obs, reset, state=None, training=True):
         step = self._step
         if training:
@@ -92,6 +96,10 @@ class Dreamer(nn.Module):
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+
+        # latent at t, actions from t-1 to t-time_resolution
+        # slow_latent, _ = self._wm.slow_dynamics.obs_step(latent, action, embed, obs["is_first"])
+
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
@@ -113,6 +121,7 @@ class Dreamer(nn.Module):
             )
         policy_output = {"action": action, "logprob": logprob}
         state = (latent, action)
+        self.action_queue.append(action)
         return policy_output, state
 
     def _train(self, data):
@@ -217,7 +226,8 @@ def main(config):
         tools.enable_deterministic_run()
     timestr = time.strftime("%Y%m%dT%H%M%S")
     logdir = (pathlib.Path(config.logdir) / timestr).expanduser()
-    config.traindir = pathlib.Path(config.traindir).expanduser() or logdir / f"train_eps"
+    print(logdir)
+    config.traindir = logdir / f"train_eps"
     config.evaldir = config.evaldir or logdir / f"eval_eps"
     config.demodir = config.demodir
     config.steps //= config.action_repeat

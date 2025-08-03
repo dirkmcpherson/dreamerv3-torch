@@ -30,6 +30,7 @@ class RSSM(nn.Module):
         embed=None,
         device=None,
         gru_blocks=1,
+        time_resolution=1, 
     ):
         super(RSSM, self).__init__()
         self._stoch = stoch
@@ -47,6 +48,7 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
+        self.time_resolution = time_resolution
         self._blocks = gru_blocks
         assert deter % self._blocks == 0, "deter must be divisible by blocks. Got {} and {} = {}".format(
             deter, self._blocks, deter % self._blocks
@@ -54,9 +56,9 @@ class RSSM(nn.Module):
 
         inp_layers = []
         if self._discrete:
-            inp_dim = self._stoch * self._discrete + num_actions
+            inp_dim = self._stoch * self._discrete + time_resolution * num_actions
         else:
-            inp_dim = self._stoch + num_actions
+            inp_dim = self._stoch + time_resolution * num_actions
         inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
@@ -193,7 +195,7 @@ class RSSM(nn.Module):
         if prev_state == None or torch.sum(is_first) == len(is_first):
             prev_state = self.initial(len(is_first))
             prev_action = torch.zeros(
-                (len(is_first), self._num_actions), device=self._device
+                (len(is_first), self.time_resolution * self._num_actions), device=self._device
             )
         # overwrite the prev_state only where is_first=True
         elif torch.sum(is_first) > 0:
