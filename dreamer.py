@@ -267,6 +267,7 @@ def main(config):
                 print(f"Resize demo image from {W}x{H} to {config.size[0]}x{config.size[1]}")
                 resized_images = [cv2.resize(img, tuple(reversed(config.size)), interpolation=cv2.INTER_NEAREST) for img in ep.get("image")]
             ep["image"] = np.array(resized_images)
+            if "pixels" in ep: del ep["pixels"]  # remove pixels if exists
         
             train_eps[epkey] = ep
             total_r += ep["reward"].sum()
@@ -357,9 +358,11 @@ def main(config):
                 is_eval=True,
                 episodes=config.eval_episode_num,
             )
-            if config.video_pred_log:
-                video_pred = agent._wm.video_pred(next(eval_dataset))
-                logger.video("eval_openl", to_np(video_pred))
+            # if config.video_pred_log:
+            #     print("Create video prediction.")
+            #     video_pred = agent._wm.video_pred(next(eval_dataset))
+            #     print("Log video prediction.")
+            #     logger.video("eval_openl", to_np(video_pred))
         print("Start training.")
         state = tools.simulate(
             agent,
