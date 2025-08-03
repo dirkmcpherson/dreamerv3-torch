@@ -193,7 +193,7 @@ memorymaze:
 pinpad_four:
   size: [64, 64]
   task: 'pinpad_four'
-  steps: 1e4
+  steps: 5e4
   envs: 10
   train_ratio: 1024
   video_pred_log: true
@@ -202,6 +202,13 @@ pinpad_four:
   imag_gradient: 'reinforce'
   action_repeat: 1
   time_limit: 150
+
+pusht:
+  train_ratio: 256 # 1024 is every step for 16 batch_length and 64 batch_size
+  size: [64, 64]
+  task: pusht_PushT-v0
+  step: 1e5
+  time_limit: 300
 
 debug:
   debug: True

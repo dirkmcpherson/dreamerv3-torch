@@ -169,6 +169,10 @@ def make_env(config, mode, id):
             seed=config.seed + id,
         )
         env = wrappers.OneHotAction(env)
+    elif suite == "pusht":
+        from envs.pusht import PushT
+        env = PushT(size=config.size, max_steps=config.time_limit, force_sparse=False, action_repeat=config.action_repeat)
+        env = wrappers.NormalizeActions(env)
     elif suite == "dmlab":
         import envs.dmlab as dmlab
 
@@ -217,7 +221,7 @@ def main(config):
         tools.enable_deterministic_run()
     timestr = time.strftime("%Y%m%dT%H%M%S")
     logdir = (pathlib.Path(config.logdir) / timestr).expanduser()
-    config.traindir = pathlib.Path(config.traindir).expanduser() or logdir / f"train_eps"
+    config.traindir = logdir / f"train_eps"
     config.evaldir = config.evaldir or logdir / f"eval_eps"
     config.demodir = config.demodir
     config.steps //= config.action_repeat
@@ -255,6 +259,15 @@ def main(config):
         for epkey, ep in demo_eps.items():
             if _print_keys():
                 print("Demo keys:", list(ep.keys()))
+
+            # if the image size is not the same as the config size, resize it
+            T, W, H, CH = ep.get("image").shape
+            if (W, H) != tuple(config.size):
+                import cv2
+                print(f"Resize demo image from {W}x{H} to {config.size[0]}x{config.size[1]}")
+                resized_images = [cv2.resize(img, tuple(reversed(config.size)), interpolation=cv2.INTER_NEAREST) for img in ep.get("image")]
+            ep["image"] = np.array(resized_images)
+        
             train_eps[epkey] = ep
             total_r += ep["reward"].sum()
         print(f"Total reward of demos: {total_r}")
