@@ -45,7 +45,7 @@ class PushT(gym.Env):
             print("Success!")
 
         if self.force_sparse:
-            reward = 1.0 if info['is_success'] else 0.0
+            reward = 100.0 if info['is_success'] else 0.0
 
         # Transpose 
         obs["is_first"] = False
