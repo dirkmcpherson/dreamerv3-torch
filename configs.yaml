@@ -32,8 +32,8 @@ defaults:
   reward_EMA: True
 
   # Model
-  dyn_hidden: 512
-  dyn_deter: 512
+  dyn_hidden: 1024
+  dyn_deter: 4096
   dyn_gru_blocks: 8
   dyn_stoch: 32
   dyn_discrete: 32
@@ -74,6 +74,7 @@ defaults:
   grad_clip: 1000
   dataset_size: 1000000
   opt: 'adam'
+  use_chaos: False
 
   # Behavior.
   discount: 0.997
@@ -194,8 +195,8 @@ pinpad_four:
   size: [64, 64]
   task: 'pinpad_four'
   steps: 5e4
-  envs: 10
-  train_ratio: 1024
+  envs: 8
+  train_ratio: 512
   video_pred_log: true
   eval_episode_num: 100
   actor: {dist: 'onehot', std: 'none'}

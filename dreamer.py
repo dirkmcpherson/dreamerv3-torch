@@ -171,7 +171,7 @@ def make_env(config, mode, id):
         env = wrappers.OneHotAction(env)
     elif suite == "pusht":
         from envs.pusht import PushT
-        env = PushT(size=config.size, max_steps=config.time_limit, force_sparse=True, action_repeat=config.action_repeat)
+        env = PushT(size=config.size, max_steps=config.time_limit, force_sparse=False, action_repeat=config.action_repeat)
         env = wrappers.NormalizeActions(env)
     elif suite == "dmlab":
         import envs.dmlab as dmlab

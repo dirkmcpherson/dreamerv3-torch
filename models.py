@@ -1,7 +1,9 @@
 import copy
 import torch
-from torch import nn
 
+from torch import nn
+import contextlib
+import IPython
 import networks
 import tools
 from constants import STATIC_CONSTANTS
@@ -315,7 +317,22 @@ class ImagBehavior(nn.Module):
                     weights,
                     base,
                 )
+
                 actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
+
+                if self._config.use_chaos:
+                    ## Reward to incentivize stability from https://github.com/Roryoung/Maximal-Lyapunov-Exponent-Regularisation/tree/master
+                    # get divergence regularisation
+                    # HACK: for fast debugging. TODO: If we're going to bother to generate n imagined unrolls, we should use them for the actual actor loss as well (average)
+                    # ===== Low-VRAM MC stability regularizer =====
+                    n = 16
+                    pred_std, rec_std = self._mc_stability(start, n, self._config.imag_horizon)
+                    div_reg = pred_std + rec_std
+
+                    metrics['train/divergence_reg'] = to_np(torch.mean(div_reg[1:]))
+                    # from IPython import embed as ipshell; ipshell()
+                    actor_loss -= div_reg[1:]                     # broadcast over time/batch
+
                 actor_loss = torch.mean(actor_loss)
                 metrics.update(mets)
                 value_input = imag_feat
@@ -349,25 +366,28 @@ class ImagBehavior(nn.Module):
             metrics.update(self._value_opt(value_loss, self.value.parameters()))
         return imag_feat, imag_state, imag_action, weights, metrics
 
-    def _imagine(self, start, policy, horizon):
+    def _imagine(self, start, policy, horizon, *, build_graph: bool = False):
         dynamics = self._world_model.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev
-            feat = dynamics.get_feat(state)
-            inp = feat.detach()
-            action = policy(inp).sample()
+            feat = dynamics.get_feat(state)            # WM forward only
+            inp = feat.detach()                        # stop-grad into actor inputs
+            action = policy(inp).sample()              # REINFORCE style, no path through dynamics
             succ = dynamics.img_step(state, action)
             return succ, feat, action
 
-        succ, feats, actions = tools.static_scan(
-            step, [torch.arange(horizon)], (start, None, None)
-        )
-        states = {k: torch.cat([start[k][None], v[:-1]], 0) for k, v in succ.items()}
-
+        ctx = contextlib.nullcontext() if build_graph else torch.no_grad()
+        with ctx:
+            succ, feats, actions = tools.static_scan(
+                step, [torch.arange(horizon)], (start, None, None)
+            )
+            states = {k: torch.cat([start[k][None], v[:-1]], 0) for k, v in succ.items()}
         return feats, states, actions
+
+
 
     def _compute_target(self, imag_feat, imag_state, reward):
         if "cont" in self._world_model.heads:
@@ -438,3 +458,44 @@ class ImagBehavior(nn.Module):
                 for s, d in zip(self.value.parameters(), self._slow_value.parameters()):
                     d.data = mix * s.data + (1 - mix) * d.data
             self._updates += 1
+
+    def _mc_stability(self, start, n, horizon):
+        """
+        Returns two tensors [T+1, B, 1]:
+        - pred_std: std across MC samples of decoder/feature proxy (cheap)
+        - rec_std : std across MC samples of recurrent state summary
+        Both computed with Welford online variance under torch.no_grad().
+        """
+        def summarize(feat, state):
+            # Reduce per-sample to a scalar per (t, b) to keep memory tiny
+            # (alternatives: use decoder penultimate features; or JS on categorical prior)
+            f = feat.mean(dim=-1, keepdim=True)                # [T+1, B, 1]
+            # typical RSSM keys: 'deter' (RNN) and 'stoch' (discrete/cont.)
+            deter = state['deter'] if 'deter' in state else next(iter(state.values()))
+            s = deter.mean(dim=-1, keepdim=True)               # [T+1, B, 1]
+            return f, s
+
+        k = 0
+        mean_f = mean_s = M2_f = M2_s = None
+        with torch.no_grad(), torch.cuda.amp.autocast(self._use_amp):
+            for _ in range(n):
+                feat, state, _ = self._imagine(start, self.actor, horizon, build_graph=False)
+                f, s = summarize(feat, state)
+                # push accumulation to CPU to free VRAM
+                f, s = f.float().cpu(), s.float().cpu()
+                if k == 0:
+                    mean_f, mean_s = f.clone(), s.clone()
+                    M2_f,   M2_s   = torch.zeros_like(f), torch.zeros_like(s)
+                else:
+                    df = f - mean_f
+                    mean_f += df / (k + 1)
+                    M2_f   += df * (f - mean_f)
+                    ds = s - mean_s
+                    mean_s += ds / (k + 1)
+                    M2_s   += ds * (s - mean_s)
+                k += 1
+
+        eps = 1e-8
+        std_f = (M2_f / max(k - 1, 1)).clamp_min(0).sqrt().to(self._config.device) + eps
+        std_s = (M2_s / max(k - 1, 1)).clamp_min(0).sqrt().to(self._config.device) + eps
+        return std_f, std_s
