@@ -30,6 +30,7 @@ defaults:
   grayscale: False
   prefill: 2500
   reward_EMA: True
+  force_sparse: False
 
   # Model
   dyn_hidden: 1024

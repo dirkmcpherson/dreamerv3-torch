@@ -171,7 +171,7 @@ def make_env(config, mode, id):
         env = wrappers.OneHotAction(env)
     elif suite == "pusht":
         from envs.pusht import PushT
-        env = PushT(size=config.size, max_steps=config.time_limit, force_sparse=False, action_repeat=config.action_repeat)
+        env = PushT(size=config.size, max_steps=config.time_limit, force_sparse=config.force_sparse, action_repeat=config.action_repeat)
         env = wrappers.NormalizeActions(env)
     elif suite == "dmlab":
         import envs.dmlab as dmlab
@@ -267,10 +267,12 @@ def main(config):
                 print(f"Resize demo image from {W}x{H} to {config.size[0]}x{config.size[1]}")
                 resized_images = [cv2.resize(img, tuple(reversed(config.size)), interpolation=cv2.INTER_NEAREST) for img in ep.get("image")]
             ep["image"] = np.array(resized_images)
-            sparse_reward = np.zeros_like(ep["reward"])
-            if "is_last" in ep:
-                sparse_reward[ep["is_last"]] = 100
-            ep["reward"] = sparse_reward
+
+            if config.force_sparse_reward:
+                sparse_reward = np.zeros_like(ep["reward"])
+                if "is_last" in ep:
+                    sparse_reward[ep["is_last"]] = 100
+                ep["reward"] = sparse_reward
             if "pixels" in ep: del ep["pixels"]  # remove pixels if exists
         
             train_eps[epkey] = ep
