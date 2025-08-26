@@ -331,7 +331,7 @@ class ImagBehavior(nn.Module):
 
                     metrics['train/divergence_reg'] = to_np(torch.mean(div_reg[1:]))
                     # from IPython import embed as ipshell; ipshell()
-                    actor_loss -= div_reg[1:]                     # broadcast over time/batch
+                    actor_loss -= -0.1 * div_reg[1:]                     # broadcast over time/batch
 
                 actor_loss = torch.mean(actor_loss)
                 metrics.update(mets)
