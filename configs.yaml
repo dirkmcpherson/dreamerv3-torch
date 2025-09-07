@@ -3,6 +3,7 @@ defaults:
   skip_first_eval: False
   logdir: null
   demodir: null
+  maxnumdemos: 100
   traindir: null
   evaldir: null
   offline_traindir: ''
@@ -70,6 +71,7 @@ defaults:
   batch_length: 64
   train_ratio: 512
   pretrain: 100
+  reduce_lr_after_pretraining: True
   model_lr: 1e-4
   opt_eps: 1e-8
   grad_clip: 1000
@@ -194,16 +196,18 @@ memorymaze:
 pinpad_four:
   size: [64, 64]
   task: 'pinpad_four'
-  steps: 5e4
-  envs: 10
-  train_ratio: 1024
+  steps: 4e4
+  log_every: 1e3
+  envs: 8
+  train_ratio: 256
   video_pred_log: true
-  eval_episode_num: 100
+  eval_episode_num: 20
   actor: {dist: 'onehot', std: 'none'}
   imag_gradient: 'reinforce'
   action_repeat: 1
   time_limit: 150
-
+  encoder: {cnn_depth: 16, mlp_layers: 2}
+  decoder: {cnn_depth: 16, mlp_layers: 2}
 pusht:
   train_ratio: 256 # 1024 is every step for 16 batch_length and 64 batch_size
   size: [64, 64]

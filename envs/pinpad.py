@@ -60,8 +60,8 @@ class PinPad(gym.Env):
       assert task == 'five', "Extra obs only supported for task five"
     self.random_starting_pos = random_starting_pos
     
-    print(f'Created PinPad env with sequence: {"->".join(self.target)}' + f' and extra obs' if self.EXTRA_OBS else '')
-
+    self.next_tile_in_sequence = None; self.use_dense_reward = True
+    print(f'Created PinPad env with sequence: {"->".join(self.target)}' + f' and extra obs' if self.EXTRA_OBS else '', f'{self.use_dense_reward}')
     self.automated_action_idx = 0
 
   def gen_extra_obs(self):
@@ -95,6 +95,7 @@ class PinPad(gym.Env):
     self.done = False
     self.countdown = 0
 
+    self.next_tile_in_sequence = None
     self.max_correct_sequence = 0
 
     return self._obs(reward=0.0, is_first=True) # just return the observation
@@ -124,6 +125,21 @@ class PinPad(gym.Env):
           'is_last': gym.spaces.Box(low=0, high=1, shape=(), dtype=bool),
           'is_terminal': gym.spaces.Box(low=0, high=1, shape=(), dtype=bool),
       })
+    
+  def get_dense_reward(self, tile):
+    # small negative for breaking the sequence + small positive for correct next tile
+    if self.next_tile_in_sequence is None: self.next_tile_in_sequence = 0
+
+    if self.next_tile_in_sequence >= len(self.target):
+      print(f"WARNING: next_tile_in_sequence {self.next_tile_in_sequence} >= len(target) {len(self.target)}")
+      from IPython import embed; embed()
+    
+    if tile != self.target[self.next_tile_in_sequence]: 
+      self.next_tile_in_sequence = None
+      return 0.0
+    else:
+      self.next_tile_in_sequence += 1
+      return 0.01 * self.next_tile_in_sequence
 
   def step(self, action, info=None):
     if self.done:
@@ -132,7 +148,7 @@ class PinPad(gym.Env):
       self.countdown -= 1
       if self.countdown == 0:
         # self.player = self.spawns[self.random.randint(len(self.spawns))]
-        self.sequence.clear()
+        self.sequence.clear(); self.next_tile_in_sequence = None
     reward = 0.0
     move = [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)][action]
     # print(f"pinpad move {move}")
@@ -142,8 +158,11 @@ class PinPad(gym.Env):
     if tile != '#':
       self.player = (x, y)
     if tile in self.pads:
-      if not self.sequence or self.sequence[-1] != tile:
+      if not self.sequence or tile != self.sequence[-1]:
+        if self.use_dense_reward:
+          reward += self.get_dense_reward(tile)
         self.sequence.append(tile)
+        
     if tuple(self.sequence) == self.target and not self.countdown:
       reward += 10.0
       self.countdown = 4

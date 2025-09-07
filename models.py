@@ -107,6 +107,18 @@ class WorldModel(nn.Module):
             cont=config.cont_head["loss_scale"],
         )
 
+    def reset_optimizer(self, lr_ratio=1.0):
+        self._model_opt = tools.Optimizer(
+            "model",
+            self.parameters(),
+            self._config.model_lr * lr_ratio,
+            self._config.opt_eps,
+            self._config.grad_clip,
+            self._config.weight_decay,
+            opt=self._config.opt,
+            use_amp=self._use_amp,
+        )
+
     def _train(self, data):
         # action (batch_size, batch_length, act_dim)
         # image (batch_size, batch_length, h, w, ch)

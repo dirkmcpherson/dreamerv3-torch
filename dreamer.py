@@ -31,7 +31,7 @@ class Dreamer(nn.Module):
         super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
-        self._should_log = tools.Every(config.log_every)
+        self._should_log = tools.Every(config.log_every); self._should_log_video = tools.Every(int(config.log_every * 5))
         batch_steps = config.batch_size * config.batch_length
         self._should_train = tools.Every(batch_steps / config.train_ratio)
         self._should_pretrain = tools.Once()
@@ -59,22 +59,32 @@ class Dreamer(nn.Module):
     def __call__(self, obs, reset, state=None, training=True):
         step = self._step
         if training:
+            should_pretrain = self._should_pretrain()
             steps = (
                 self._config.pretrain
-                if self._should_pretrain()
+                if should_pretrain
                 else self._should_train(step)
             )
             for _ in range(steps):
-                self._train(next(self._dataset))
+                if should_pretrain:
+                    self.update_metrics(self._train_wm(next(self._dataset)))
+                else:
+                    self.update_metrics(self._train(next(self._dataset)))
+
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
+
+            if self._config.reduce_lr_after_pretraining and should_pretrain:
+                print("Reduce learning rate after pretraining.")
+                self._wm.reset_optimizer(lr_ratio=1/10)
+
             if self._should_log(step):
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
-                if self._config.video_pred_log:
-                    openl = self._wm.video_pred(next(self._dataset))
-                    self._logger.video("train_openl", to_np(openl))
+                if self._should_log_video(step) and self._config.video_pred_log:
+                        openl = self._wm.video_pred(next(self._dataset))
+                        self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
 
         policy_output, state = self._policy(obs, state, training)
@@ -83,6 +93,13 @@ class Dreamer(nn.Module):
             self._step += len(reset)
             self._logger.step = self._config.action_repeat * self._step
         return policy_output, state
+
+    def update_metrics(self, mets):
+        for name, value in mets.items():
+            if not name in self._metrics.keys():
+                self._metrics[name] = [value]
+            else:
+                self._metrics[name].append(value)
 
     def _policy(self, obs, state, training):
         if state is None:
@@ -97,7 +114,7 @@ class Dreamer(nn.Module):
         feat = self._wm.dynamics.get_feat(latent)
         if not training:
             actor = self._task_behavior.actor(feat)
-            action = actor.mode()
+            action = actor.sample() #actor.mode()
         elif self._should_expl(self._step):
             actor = self._expl_behavior.actor(feat)
             action = actor.sample()
@@ -127,12 +144,11 @@ class Dreamer(nn.Module):
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
-        for name, value in metrics.items():
-            if not name in self._metrics.keys():
-                self._metrics[name] = [value]
-            else:
-                self._metrics[name].append(value)
-
+        return metrics
+    
+    def _train_wm(self, data):
+        post, context, mets = self._wm._train(data)
+        return mets
 
 def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
@@ -221,6 +237,10 @@ def main(config):
         tools.enable_deterministic_run()
     timestr = time.strftime("%Y%m%dT%H%M%S")
     logdir = (pathlib.Path(config.logdir) / timestr).expanduser()
+
+    # add the notes to the logdir
+    # if config.notes: logdir = logdir.parent / (logdir.name + "_" + config.notes.replace(" ", "_"))
+
     config.traindir = logdir / f"train_eps"
     config.evaldir = config.evaldir or logdir / f"eval_eps"
     config.demodir = config.demodir
@@ -254,7 +274,7 @@ def main(config):
         demodir = pathlib.Path(config.demodir).expanduser()
         print("Load demos from", demodir)
         demo_eps = tools.load_episodes(demodir, limit=config.dataset_size)
-        total_r = 0
+        total_r = 0; n_demos = 0
         _print_keys = tools.Once()
         for epkey, ep in demo_eps.items():
             if _print_keys():
@@ -266,9 +286,9 @@ def main(config):
                 import cv2
                 print(f"Resize demo image from {W}x{H} to {config.size[0]}x{config.size[1]}")
                 resized_images = [cv2.resize(img, tuple(reversed(config.size)), interpolation=cv2.INTER_NEAREST) for img in ep.get("image")]
-            ep["image"] = np.array(resized_images)
+                ep["image"] = np.array(resized_images)
 
-            if config.force_sparse_reward:
+            if config.force_sparse:
                 sparse_reward = np.zeros_like(ep["reward"])
                 if "is_last" in ep:
                     sparse_reward[ep["is_last"]] = 100
@@ -276,7 +296,8 @@ def main(config):
             if "pixels" in ep: del ep["pixels"]  # remove pixels if exists
         
             train_eps[epkey] = ep
-            total_r += ep["reward"].sum()
+            total_r += ep["reward"].sum(); n_demos += 1
+            if n_demos >= config.maxnumdemos: break
         print(f"Total reward of demos: {total_r}")
         if total_r == 0:
             print("Warning: total reward of demos is 0, this may cause problems in training. Exiting...")
