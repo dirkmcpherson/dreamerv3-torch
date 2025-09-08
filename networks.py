@@ -731,7 +731,10 @@ class MLP(nn.Module):
                 torchd.independent.Independent(dist, 1), absmax=self._absmax
             )
         elif dist == "onehot":
-            dist = tools.OneHotDist(mean, unimix_ratio=self._unimix_ratio)
+            if len(self._shape) == 1:
+                return tools.OneHotDist(logits=mean, unimix_ratio=self.unimix_ratio)
+            else: # Skill distribution
+                return torch.distributions.independent.Independent(tools.OneHotDist(logits=mean, unimix_ratio=self.unimix_ratio), 1)
         elif dist == "onehot_gumble":
             dist = tools.ContDist(
                 torchd.gumbel.Gumbel(mean, 1 / self._temp), absmax=self._absmax
