@@ -698,6 +698,12 @@ class MLP(nn.Module):
                 std = self.std_layer(out)
             else:
                 std = self._std
+
+            if (len(self._shape) == 2):
+                assert self._dist == "onehot", "only onehot is supported for 2d shape"
+                mean = mean.reshape(mean.shape[:-1] + self._shape)
+                # print(f"mean shape: {mean.shape} mean mean {mean.mean():1.4f} mean std {mean.std():1.4f}")
+
             return self.dist(self._dist, mean, std, self._shape)
 
     def dist(self, dist, mean, std, shape):
@@ -732,9 +738,9 @@ class MLP(nn.Module):
             )
         elif dist == "onehot":
             if len(self._shape) == 1:
-                return tools.OneHotDist(logits=mean, unimix_ratio=self.unimix_ratio)
+                return tools.OneHotDist(logits=mean, unimix_ratio=self._unimix_ratio)
             else: # Skill distribution
-                return torch.distributions.independent.Independent(tools.OneHotDist(logits=mean, unimix_ratio=self.unimix_ratio), 1)
+                return torch.distributions.independent.Independent(tools.OneHotDist(logits=mean, unimix_ratio=self._unimix_ratio), 1)
         elif dist == "onehot_gumble":
             dist = tools.ContDist(
                 torchd.gumbel.Gumbel(mean, 1 / self._temp), absmax=self._absmax
