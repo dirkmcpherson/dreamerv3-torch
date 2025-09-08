@@ -22,6 +22,8 @@ from torch import nn
 from torch import distributions as torchd
 from constants import STATIC_CONSTANTS
 
+import director_utils as dutils
+
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -355,13 +357,20 @@ def main(config):
     print("Simulate agent.")
     train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
-    agent = Dreamer(
-        train_envs[0].observation_space,
-        train_envs[0].action_space,
-        config,
-        logger,
-        train_dataset,
-    ).to(config.device)
+
+
+    if dreamer_algorithm:=False:
+        agent = Dreamer(
+            train_envs[0].observation_space,
+            train_envs[0].action_space,
+            config,
+            logger,
+            train_dataset,
+        ).to(config.device)
+    else:
+        agent, worker, manager, goal_ae, wm = dutils.get_model(train_envs[0], config, train_dataset, logger)
+        agent = agent.to(config.device)
+        
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest.pt").exists():
         checkpoint = torch.load(logdir / "latest.pt")

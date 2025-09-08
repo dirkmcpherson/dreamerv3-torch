@@ -754,6 +754,8 @@ class MLP(nn.Module):
             dist = tools.DiscDist(logits=mean, device=self._device)
         elif dist == "symlog_mse":
             dist = tools.SymlogDist(mean)
+        elif dist == "mse":
+            return tools.MSEDist(mean)
         else:
             raise NotImplementedError(dist)
         return dist
